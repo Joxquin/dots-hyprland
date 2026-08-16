@@ -1,7 +1,6 @@
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
-
 import QtQuick
 import QtQuick.Layouts
 import qs.modules.ii.bar
@@ -10,106 +9,163 @@ StyledPopup {
     id: root
 
     ColumnLayout {
-        id: columnLayout
-        anchors.centerIn: parent
-        implicitWidth: Math.max(header.implicitWidth, gridLayout.implicitWidth)
-        implicitHeight: gridLayout.implicitHeight
-        spacing: 5
+        id: mainLayout
+        implicitWidth: 340 
+        spacing: Appearance.spacing.space100
 
-        // Header
-        ColumnLayout {
-            id: header
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 2
+        Layout.topMargin: -Appearance.spacing.space100
+        Layout.leftMargin: -Appearance.spacing.space100
+        Layout.rightMargin: -Appearance.spacing.space100
 
-            RowLayout {
-                Layout.alignment: Qt.AlignHCenter
-                spacing: 6
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 125
 
-                MaterialSymbol {
-                    fill: 0
-                    font.weight: Font.Medium
-                    text: "location_on"
-                    iconSize: Appearance.font.pixelSize.large
-                    color: Appearance.colors.colOnSurfaceVariant
-                }
+            topLeftRadius: Appearance.rounding.normal - 2
+            topRightRadius: Appearance.rounding.normal - 2
+            bottomLeftRadius: Appearance.rounding.normal
+            bottomRightRadius: Appearance.rounding.normal
 
-                StyledText {
-                    text: Weather.data.city
-                    font {
-                        weight: Font.Medium
-                        pixelSize: Appearance.font.pixelSize.normal
-                    }
-                    color: Appearance.colors.colOnSurfaceVariant
-                }
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: Appearance.colors.colPrimaryContainer }
+                GradientStop { position: 1.0; color: Appearance.colors.colSurfaceContainerLow }
             }
-            StyledText {
-                id: temp
-                font.pixelSize: Appearance.font.pixelSize.smaller
-                color: Appearance.colors.colOnSurfaceVariant
-                text: Weather.data.temp + " • " + Translation.tr("Feels like %1").arg(Weather.data.tempFeelsLike)
+
+            Item {
+                anchors.fill: parent
+                anchors.margins: Appearance.spacing.space200
+
+                ColumnLayout {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.topMargin: -Appearance.spacing.space100
+                    spacing: -Appearance.spacing.space25
+
+                    StyledText {
+                        text: Weather.data?.city ?? "Paris, France"
+                        font.pixelSize: Appearance.font.pixelSize.normal
+                        font.weight: Font.DemiBold
+                        color: Appearance.colors.colOnLayer0
+                    }
+
+                    StyledText {
+                        text: Weather.data?.description ?? "Cloudy"
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colOnLayer0
+                        opacity: 0.6
+                    }
+                }
+
+                RowLayout {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: -Appearance.spacing.space100
+                    spacing: Appearance.spacing.space50
+
+                    StyledText {
+                        text: Weather.data?.temp ?? "3"
+                        font.pixelSize: 48
+                        font.weight: Font.Light
+                        color: Appearance.colors.colOnLayer0
+                    }
+                }
+
+                MaterialShapeWrappedMaterialSymbol {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: -Appearance.spacing.space50
+                    shape: MaterialShape.Shape.Sunny
+                    text: Icons.getWeatherIcon(Weather.data.wCode) ?? "cloud"
+                    iconSize: 40
+                    implicitSize: 64
+                    color: Qt.alpha(Appearance.colors.colOnLayer0, 0.15)
+                    colSymbol: Appearance.colors.colPrimary
+                }
+
+                ColumnLayout {
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.rightMargin: Appearance.spacing.space100
+                    anchors.bottomMargin: -Appearance.spacing.space25
+                    spacing: -Appearance.spacing.space25
+
+                    RowLayout {
+                        spacing: Appearance.spacing.space50
+                        Layout.alignment: Qt.AlignRight
+                        MaterialSymbol {
+                            text: "wb_twilight"
+                            iconSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colPrimary
+                        }
+                        StyledText {
+                            text: Weather.data?.sunrise ?? "07:34 AM"
+                            font.pixelSize: Appearance.font.pixelSize.smallest
+                            color: Appearance.colors.colOnLayer0
+                            opacity: 0.8
+                        }
+                    }
+
+                    RowLayout {
+                        spacing: Appearance.spacing.space50
+                        Layout.alignment: Qt.AlignRight
+                        MaterialSymbol {
+                            text: "bedtime"
+                            iconSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colPrimary
+                        }
+                        StyledText {
+                            text: Weather.data?.sunset ?? "05:21 PM"
+                            font.pixelSize: Appearance.font.pixelSize.smallest
+                            color: Appearance.colors.colOnLayer0
+                            opacity: 0.8
+                        }
+                    }
+                }
             }
         }
 
-        // Metrics grid
         GridLayout {
             id: gridLayout
             columns: 2
-            rowSpacing: 5
-            columnSpacing: 5
+            rowSpacing: Appearance.spacing.space50
+            columnSpacing: Appearance.spacing.space50
             uniformCellWidths: true
+            
+            Layout.leftMargin: Appearance.spacing.space25
+            Layout.rightMargin: Appearance.spacing.space25
+            Layout.bottomMargin: Appearance.spacing.space25
+            Layout.fillWidth: true
 
             WeatherCard {
-                title: Translation.tr("UV Index")
-                symbol: "wb_sunny"
-                value: Weather.data.uv
+                title: Translation.tr("Rain?")
+                symbol: "rainy"
+                value: Weather.data?.cr ?? "24%"
             }
             WeatherCard {
                 title: Translation.tr("Wind")
                 symbol: "air"
-                value: `(${Weather.data.windDir}) ${Weather.data.wind}`
+                value: `${Weather.data?.wind ?? "1.2 km/h"}`
             }
             WeatherCard {
                 title: Translation.tr("Precipitation")
                 symbol: "rainy_light"
-                value: Weather.data.precip
+                value: Weather.data?.precip ?? "10%"
             }
             WeatherCard {
                 title: Translation.tr("Humidity")
                 symbol: "humidity_low"
-                value: Weather.data.humidity
+                value: Weather.data?.humidity ?? "65%"
             }
             WeatherCard {
                 title: Translation.tr("Visibility")
                 symbol: "visibility"
-                value: Weather.data.visib
+                value: Weather.data?.visib ?? "10 km"
             }
             WeatherCard {
                 title: Translation.tr("Pressure")
                 symbol: "readiness_score"
-                value: Weather.data.press
+                value: Weather.data?.press ?? "720 hpa"
             }
-            WeatherCard {
-                title: Translation.tr("Sunrise")
-                symbol: "wb_twilight"
-                value: Weather.data.sunrise
-            }
-            WeatherCard {
-                title: Translation.tr("Sunset")
-                symbol: "bedtime"
-                value: Weather.data.sunset
-            }
-        }
-
-        // Footer: last refresh
-        StyledText {
-            Layout.alignment: Qt.AlignHCenter
-            text: Translation.tr("Last refresh: %1").arg(Weather.data.lastRefresh)
-            font {
-                weight: Font.Medium
-                pixelSize: Appearance.font.pixelSize.smaller
-            }
-            color: Appearance.colors.colOnSurfaceVariant
         }
     }
 }

@@ -2,69 +2,218 @@ import qs.modules.common
 import qs.modules.common.widgets
 import qs.services
 import QtQuick
-import QtQuick.Layouts
 
 StyledPopup {
     id: root
-    property string formattedDate: Qt.locale().toString(DateTime.clock.date, "dddd, MMMM dd, yyyy")
-    property string formattedTime: DateTime.time
-    property string formattedUptime: DateTime.uptime
-    property string todosSection: getUpcomingTodos()
+    property var today: new Date()
+    contentPadding: Appearance.spacing.space200
+    readonly property var pendingTodos: Todo.list.filter(todo => !todo.done)
 
-    function getUpcomingTodos() {
-        const unfinishedTodos = Todo.list.filter(function (item) {
-            return !item.done;
-        });
-        if (unfinishedTodos.length === 0) {
-            return Translation.tr("No pending tasks");
+    Item {
+        implicitWidth: 340
+        implicitHeight: 220
+
+        StyledText {
+            id: monthLabel
+            anchors {
+                left: parent.left
+                top: parent.top
+            }
+            text: Qt.locale().toString(root.today, "MMMM")
+            font.pixelSize: Appearance.font.pixelSize.huge
+            font.weight: Font.Bold
+            color: Appearance.colors.colOnLayer1
         }
 
-        // Limit to first 5 todos to keep popup manageable
-        const limitedTodos = unfinishedTodos.slice(0, 5);
-        let todoText = limitedTodos.map(function (item, index) {
-            return `  ${index + 1}. ${item.content}`;
-        }).join('\n');
-
-        if (unfinishedTodos.length > 5) {
-            todoText += `\n  ${Translation.tr("... and %1 more").arg(unfinishedTodos.length - 5)}`;
+        StyledText {
+            anchors {
+                left: monthLabel.right
+                leftMargin: Appearance.spacing.space100
+                baseline: monthLabel.baseline
+            }
+            text: Qt.locale().toString(root.today, "yyyy")
+            font.pixelSize: Appearance.font.pixelSize.huge
+            color: Appearance.colors.colOnSurfaceVariant
         }
 
-        return todoText;
-    }
+        Row {
+            id: weekRow
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: monthLabel.bottom
+                topMargin: Appearance.spacing.space100
+            }
+            spacing: Appearance.spacing.space50
 
-    ColumnLayout {
-        id: columnLayout
-        anchors.centerIn: parent
-        spacing: 4
+            Repeater {
+                model: 7
 
-        StyledPopupHeaderRow {
-            icon: "calendar_month"
-            label: root.formattedDate
+                delegate: Rectangle {
+                    required property int index
+                    readonly property var date: {
+                        const value = new Date(root.today)
+                        value.setDate(root.today.getDate() - root.today.getDay() + index)
+                        return value
+                    }
+                    readonly property bool isToday: date.toDateString() === root.today.toDateString()
+                    width: (weekRow.width - weekRow.spacing * 6) / 7
+                    height: 58
+                    radius: Appearance.rounding.normal
+                    color: isToday
+                        ? Appearance.colors.colPrimaryContainer
+                        : Appearance.colors.colSurfaceContainerHigh
+
+                    StyledText {
+                        anchors {
+                            horizontalCenter: parent.horizontalCenter
+                            top: parent.top
+                            topMargin: Appearance.spacing.space75
+                        }
+                        text: Qt.locale().toString(parent.date, "ddd").slice(0, 2)
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        font.weight: parent.isToday ? Font.Bold : Font.Normal
+                        color: parent.isToday
+                            ? Appearance.colors.colPrimary
+                            : Appearance.colors.colOnSurfaceVariant
+                    }
+
+                    StyledText {
+                        anchors {
+                            horizontalCenter: parent.horizontalCenter
+                            bottom: parent.bottom
+                            bottomMargin: Appearance.spacing.space75
+                        }
+                        text: parent.date.getDate()
+                        font.pixelSize: parent.isToday
+                            ? Appearance.font.pixelSize.normal
+                            : Appearance.font.pixelSize.small
+                        font.weight: parent.isToday ? Font.Bold : Font.Normal
+                        color: parent.isToday
+                            ? Appearance.colors.colPrimary
+                            : Appearance.colors.colOnLayer1
+                    }
+                }
+            }
         }
 
-        StyledPopupValueRow {
-            icon: "timelapse"
-            label: Translation.tr("System uptime:")
-            value: root.formattedUptime
-        }
+        Item {
+            id: taskSection
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: weekRow.bottom
+                topMargin: Appearance.spacing.space100
+            }
+            height: 84
 
-        // Tasks
-        Column {
-            spacing: 0
-            Layout.fillWidth: true
+            Item {
+                id: taskSummary
+                anchors {
+                    left: parent.left
+                    top: parent.top
+                    bottom: parent.bottom
+                }
+                width: 56
 
-            StyledPopupValueRow {
-                icon: "checklist"
-                label: Translation.tr("To Do:")
-                value: ""
+                MaterialShapeWrappedMaterialSymbol {
+                    anchors {
+                        horizontalCenter: parent.horizontalCenter
+                        top: parent.top
+                    }
+                    shape: MaterialShape.Shape.Clover4Leaf
+                    text: "checklist"
+                    iconSize: Appearance.font.pixelSize.large
+                    implicitSize: 36
+                    color: Appearance.colors.colPrimaryContainer
+                    colSymbol: Appearance.colors.colPrimary
+                }
+
+                StyledText {
+                    anchors {
+                        horizontalCenter: parent.horizontalCenter
+                        bottom: parent.bottom
+                    }
+                    text: root.pendingTodos.length
+                    font.pixelSize: Appearance.font.pixelSize.huge
+                    font.weight: Font.Bold
+                    color: Appearance.colors.colPrimary
+                }
             }
 
-            StyledText {
-                horizontalAlignment: Text.AlignLeft
-                wrapMode: Text.Wrap
-                color: Appearance.colors.colOnSurfaceVariant
-                text: root.todosSection
+            Item {
+                id: taskCards
+                anchors {
+                    left: taskSummary.right
+                    leftMargin: Appearance.spacing.space100
+                    right: parent.right
+                    top: parent.top
+                    bottom: parent.bottom
+                }
+
+                Repeater {
+                    model: Math.min(2, root.pendingTodos.length)
+
+                    delegate: Rectangle {
+                        required property int index
+                        width: taskCards.width
+                        height: 38
+                        y: index * (height + Appearance.spacing.space50)
+                        radius: Appearance.rounding.normal
+                        color: Appearance.colors.colSurfaceContainerHigh
+
+                        StyledText {
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                leftMargin: Appearance.spacing.space150
+                                rightMargin: Appearance.spacing.space150
+                                verticalCenter: parent.verticalCenter
+                            }
+                            text: `    ${root.pendingTodos[root.pendingTodos.length - 1 - index].content} `
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colOnLayer1
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    visible: root.pendingTodos.length === 0
+                    radius: Appearance.rounding.normal
+                    color: Appearance.colors.colSurfaceContainerHigh
+
+                    StyledText {
+                        anchors.centerIn: parent
+                        text: Translation.tr("No pending tasks")
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.colors.colOnLayer1
+                    }
+                }
             }
+        }
+
+        StyledText {
+            id: pendingLabel
+            anchors {
+                left: parent.left
+                top: taskSection.bottom
+                topMargin: Appearance.spacing.space100
+            }
+            text: Translation.tr("%1 pending tasks").arg(root.pendingTodos.length)
+            font.pixelSize: Appearance.font.pixelSize.smaller
+            color: Appearance.colors.colOnSurfaceVariant
+        }
+
+        StyledText {
+            anchors {
+                right: parent.right
+                baseline: pendingLabel.baseline
+            }
+            text: Translation.tr("Uptime %1").arg(DateTime.uptime)
+            font.pixelSize: Appearance.font.pixelSize.smaller
+            color: Appearance.colors.colOnSurfaceVariant
         }
     }
 }
