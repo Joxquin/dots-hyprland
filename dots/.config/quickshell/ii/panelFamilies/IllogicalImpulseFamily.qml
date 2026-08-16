@@ -46,4 +46,5 @@ Scope {
     PanelLoader { extraCondition: Config.options.bar.vertical; component: VerticalBar {} }
     PanelLoader { component: WallpaperSelector {} }
     PanelLoader { component: ScreenshotResultPanel {} }
+    PanelLoader { component: BarPopupOverlay {} }
 }

@@ -33,6 +33,9 @@ Singleton {
     property bool superReleaseMightTrigger: true
     property bool wallpaperSelectorOpen: false
     property bool workspaceShowNumbers: false
+    // The bar hover popup (StyledPopup) whose target widget is currently
+    // hovered/pinned, morphing the shared card in BarPopupOverlay.
+    property var activeBarPopup: null
 
     onSidebarRightOpenChanged: {
         if (GlobalStates.sidebarRightOpen) {
