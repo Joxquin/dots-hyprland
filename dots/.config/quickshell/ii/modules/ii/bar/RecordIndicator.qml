@@ -11,6 +11,7 @@ Item {
     readonly property bool isRecording: ScreenRecord.recording
     readonly property bool shown: isRecording
     readonly property bool vertical: Config.options.bar?.vertical ?? false
+    property bool controlsPinned: false
 
     implicitWidth: shown ? (vertical ? Appearance.sizes.verticalBarWidth : pill.implicitWidth + Appearance.spacing.space100) : 0
     implicitHeight: shown ? (vertical ? pill.implicitHeight + Appearance.spacing.space100 : Appearance.sizes.barHeight) : 0
@@ -56,9 +57,7 @@ Item {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-                if (root.isRecording) {
-                    ScreenRecord.stopRecord()
-                }
+                root.controlsPinned = !root.controlsPinned
             }
         }
 
@@ -86,14 +85,14 @@ Item {
 
             MaterialSymbol {
                 Layout.alignment: Qt.AlignVCenter
-                text: root.isRecording ? "screen_record" : "screen_share"
+                text: "screen_record"
                 iconSize: 16
                 color: Appearance.colors.colOnErrorContainer
             }
 
             StyledText {
                 Layout.alignment: Qt.AlignVCenter
-                text: mouseArea.containsMouse ? Translation.tr("Stop") : (root.isRecording ? Translation.tr("REC") : Translation.tr("LIVE"))
+                text: mouseArea.containsMouse ? Translation.tr("Stop") : Translation.tr("REC")
                 font.pixelSize: Appearance.font.pixelSize.smaller
                 font.weight: Font.Bold
                 color: Appearance.colors.colOnErrorContainer
@@ -101,8 +100,12 @@ Item {
         }
     }
 
-    StyledToolTip {
-        extraVisibleCondition: mouseArea.containsMouse
-        text: root.isRecording ? Translation.tr("Click to stop screen recording") : Translation.tr("Screen sharing active")
+    onShownChanged: if (!shown) root.controlsPinned = false
+
+    RecordIndicatorPopup {
+        id: recordPopup
+        hoverTarget: mouseArea
+        pinnedOpen: root.controlsPinned
+        onDismissRequested: root.controlsPinned = false
     }
 }
