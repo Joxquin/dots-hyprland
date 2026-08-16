@@ -86,7 +86,7 @@ ButtonMouseArea {
         layer.enabled: root.specialBlur > 0
         layer.effect: MultiEffect {
             brightness: -0.1 * root.specialBlur
-            blurEnabled: true
+            blurEnabled: false
             blur: root.specialBlur
             blurMax: 32
         }

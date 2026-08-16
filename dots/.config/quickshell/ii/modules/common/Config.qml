@@ -375,7 +375,7 @@ Singleton {
                 property bool useHyprlock: false
                 property bool launchOnStartup: false
                 property JsonObject blur: JsonObject {
-                    property bool enable: true
+                    property bool enable: false
                     property real radius: 100
                     property real extraZoom: 1.1
                 }
