@@ -41,13 +41,18 @@ Item {
             visible: Config.options.bar.utilButtons.showScreenRecord
             sourceComponent: CircleUtilButton {
                 Layout.alignment: Qt.AlignVCenter
-                onClicked: Quickshell.execDetached([Directories.recordScriptPath])
+                colBackground: ScreenRecord.recording ? Appearance.colors.colError : (root.borderless ? "transparent" : Appearance.colors.colLayer2)
+                colBackgroundHover: ScreenRecord.recording ? Appearance.colors.colErrorHover : Appearance.colors.colLayer2Hover
+                onClicked: {
+                    if (ScreenRecord.recording) ScreenRecord.stopRecord()
+                    else Quickshell.execDetached([Directories.recordScriptPath])
+                }
                 MaterialSymbol {
                     horizontalAlignment: Qt.AlignHCenter
                     fill: 1
-                    text: "videocam"
+                    text: ScreenRecord.recording ? "stop" : "videocam"
                     iconSize: Appearance.font.pixelSize.large
-                    color: Appearance.colors.colOnLayer2
+                    color: ScreenRecord.recording ? Appearance.colors.colOnError : Appearance.colors.colOnLayer2
                 }
             }
         }
