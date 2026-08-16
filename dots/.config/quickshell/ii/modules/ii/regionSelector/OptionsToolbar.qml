@@ -57,11 +57,27 @@ Toolbar {
     // one chooses, which is what makes six options out of two controls.
     ToolbarTabBar {
         id: kindBar
+        activeColor: (kindBar.currentIndex === 1 && ScreenRecord.recording)
+            ? Appearance.colors.colErrorContainer
+            : Appearance.colors.colSecondaryContainer
         tabButtonList: [
             {"icon": "photo_camera", "name": Translation.tr("Shot")},
-            {"icon": "videocam", "name": Translation.tr("Record")}
+            ScreenRecord.recording
+                ? {"icon": "stop", "name": Translation.tr("Stop Record"), "isError": true}
+                : {"icon": "videocam", "name": Translation.tr("Record")}
         ]
+        onTabClicked: index => {
+            if (index === 1 && ScreenRecord.recording) {
+                ScreenRecord.stopRecord();
+                root.dismiss();
+            }
+        }
         onCurrentIndexChanged: {
+            if (currentIndex === 1 && ScreenRecord.recording) {
+                ScreenRecord.stopRecord();
+                root.dismiss();
+                return;
+            }
             const wanted = currentIndex === 1
                 ? RegionSelection.SnipAction.Record
                 : RegionSelection.SnipAction.Copy;

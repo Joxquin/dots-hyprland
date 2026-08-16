@@ -219,28 +219,13 @@ PanelWindow {
         root.regionHeight = root.height;
         root.snip();
     }
-    property bool recordingShouldStop: false
-    Process {
-        id: checkRecordingProc
-        running: isRecording
-        command: ["pidof", "wf-recorder"]
-        onExited: (exitCode, exitStatus) => {
-            root.recordingShouldStop = (exitCode === 0);
-            root.finishPreparationIfReady();
-        }
-    }
     property bool preparationDone: false
     function finishPreparationIfReady() {
-        if (!root.screenshotReady || checkRecordingProc.running) return;
+        if (!root.screenshotReady) return;
         root.preparationDone = true;
     }
     onPreparationDoneChanged: {
         if (!preparationDone) return;
-        if (root.isRecording && root.recordingShouldStop) {
-            Quickshell.execDetached([Directories.recordScriptPath]);
-            root.dismiss();
-            return;
-        }
         root.visible = true;
     }
 
@@ -320,6 +305,12 @@ PanelWindow {
 
     // Execution after selection
     function snip() {
+        if (root.isRecording && ScreenRecord.recording) {
+            ScreenRecord.stopRecord();
+            root.dismiss();
+            return;
+        }
+
         // Validity check
         if (root.regionWidth <= 0 || root.regionHeight <= 0) {
             console.warn("[Region Selector] Invalid region size, skipping snip.");
@@ -365,12 +356,7 @@ PanelWindow {
             root.visible = false;
         } else {
             Quickshell.execDetached(command);
-            if (root.action == RegionSelection.SnipAction.Record || root.action == RegionSelection.SnipAction.RecordWithSound) {
-                root.phase = RegionSelection.Phase.Post
-                root.selectionMode = RegionSelection.SelectionMode.RectCorners
-            } else {
-                root.dismiss();
-            }
+            root.dismiss();
         }
     }
 
