@@ -11,6 +11,8 @@ Singleton {
     property QtObject animationCurves
     property QtObject colors
     property QtObject rounding
+    property QtObject spacing
+    property QtObject borderWidth
     property QtObject font
     property QtObject sizes
     property string syntaxHighlightingTheme
@@ -209,6 +211,27 @@ Singleton {
         property int full: 9999
         property int screenRounding: large
         property int windowRounding: 18
+    }
+
+    spacing: QtObject {
+        property int space0: 0
+        property int space25: 2
+        property int space50: 4
+        property int space75: 6
+        property int space100: 8
+        property int space125: 10
+        property int space150: 12
+        property int space175: 14
+        property int space200: 16
+        property int space250: 20
+        property int space300: 24
+        property int space400: 32
+    }
+
+    borderWidth: QtObject {
+        property int standard: 1
+        property int emphasis: 2
+        property int heavy: 4
     }
 
     font: QtObject {
