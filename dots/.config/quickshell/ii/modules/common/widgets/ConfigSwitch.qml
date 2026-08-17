@@ -56,7 +56,10 @@ RippleButton {
     implicitHeight: contentItem.implicitHeight + 8 
     font.pixelSize: Appearance.font.pixelSize.small
 
-    onClicked: root.toggleRequested()
+    onClicked: {
+        root.toggleRequested();
+        root.checked = !root.checked;
+    }
 
     contentItem: ColumnLayout {
         spacing: 0
