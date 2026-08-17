@@ -190,11 +190,18 @@ Singleton {
     }
 
     function discardNotification(id) {
-        console.log("[Notifications] Discarding notification with ID: " + id);
+        // console.log("[Notifications] Discarding notification with ID: " + id);
         const index = root.list.findIndex((notif) => notif.notificationId === id);
         const notifServerIndex = notifServer.trackedNotifications.values.findIndex((notif) => notif.id + root.idOffset === id);
         if (index !== -1) {
-            root.list.splice(index, 1);
+            const removed = root.list.splice(index, 1)[0];
+            if (removed) {
+                if (removed.timer) {
+                    removed.timer.stop();
+                    removed.timer.destroy();
+                }
+                removed.destroy();
+            }
             notifFileView.setText(stringifyList(root.list));
             triggerListChange()
         }
@@ -205,9 +212,19 @@ Singleton {
     }
 
     function discardAllNotifications() {
+        const oldList = root.list;
         root.list = []
         triggerListChange()
         notifFileView.setText(stringifyList(root.list));
+        oldList.forEach((notif) => {
+            if (notif) {
+                if (notif.timer) {
+                    notif.timer.stop();
+                    notif.timer.destroy();
+                }
+                notif.destroy();
+            }
+        });
         notifServer.trackedNotifications.values.forEach((notif) => {
             notif.dismiss()
         })
