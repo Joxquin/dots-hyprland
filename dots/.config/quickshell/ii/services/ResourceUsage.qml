@@ -191,29 +191,29 @@ Singleton {
         };
     }
 
+    function pushHistory(list, value) {
+        list.push(value);
+        if (list.length > historyLength) list.shift();
+        return list;
+    }
+
     function updateMemoryUsageHistory() {
-        memoryUsageHistory = [...memoryUsageHistory, memoryUsedPercentage]
-        if (memoryUsageHistory.length > historyLength) memoryUsageHistory.shift()
+        memoryUsageHistory = pushHistory(memoryUsageHistory, memoryUsedPercentage)
     }
     function updateSwapUsageHistory() {
-        swapUsageHistory = [...swapUsageHistory, swapUsedPercentage]
-        if (swapUsageHistory.length > historyLength) swapUsageHistory.shift()
+        swapUsageHistory = pushHistory(swapUsageHistory, swapUsedPercentage)
     }
     function updateCpuUsageHistory() {
-        cpuUsageHistory = [...cpuUsageHistory, cpuUsage]
-        if (cpuUsageHistory.length > historyLength) cpuUsageHistory.shift()
+        cpuUsageHistory = pushHistory(cpuUsageHistory, cpuUsage)
     }
     function updateDiskUsageHistory() {
-        diskUsageHistory = [...diskUsageHistory, diskUsedPercentage]
-        if (diskUsageHistory.length > historyLength) diskUsageHistory.shift()
+        diskUsageHistory = pushHistory(diskUsageHistory, diskUsedPercentage)
     }
     function updateGpuUsageHistory() {
-        gpuUsageHistory = [...gpuUsageHistory, gpuUsage]
-        if (gpuUsageHistory.length > historyLength) gpuUsageHistory.shift()
+        gpuUsageHistory = pushHistory(gpuUsageHistory, gpuUsage)
     }
     function updateVramUsageHistory() {
-        vramUsageHistory = [...vramUsageHistory, vramUsedPercentage]
-        if (vramUsageHistory.length > historyLength) vramUsageHistory.shift()
+        vramUsageHistory = pushHistory(vramUsageHistory, vramUsedPercentage)
     }
     function updateHistories() {
         updateMemoryUsageHistory()
