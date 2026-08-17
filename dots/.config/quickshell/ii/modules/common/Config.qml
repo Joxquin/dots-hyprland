@@ -479,6 +479,10 @@ Singleton {
                 property bool filterPassive: true
             }
 
+            property JsonObject notes: JsonObject {
+                property bool importedLegacyStore: false
+            }
+
             property JsonObject musicRecognition: JsonObject {
                 property int timeout: 16
                 property int interval: 4
