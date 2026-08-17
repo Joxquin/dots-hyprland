@@ -139,6 +139,16 @@ Singleton {
                 }
             }
 
+            property JsonObject plugins: JsonObject {
+                property list<string> enabled: []
+                property bool storeEnabled: false
+                property real blurOpacity: 0.1
+                property string frostMode: "blur"
+                property bool migratedDesktopWidgets: true
+                property bool migratedDesktopWidgetOptions: true
+                property bool migratedWorldClockTimezones: true
+            }
+
             property JsonObject audio: JsonObject {
                 // Values in %
                 property JsonObject protection: JsonObject {

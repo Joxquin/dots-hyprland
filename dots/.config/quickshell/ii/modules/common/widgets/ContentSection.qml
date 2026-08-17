@@ -6,18 +6,25 @@ import qs.modules.common.widgets
 
 ColumnLayout {
     id: root
+    readonly property bool settingsNavigationSection: true
+    property var shape: MaterialShape.Shape.Clover4Leaf
     property string title
     property string icon: ""
+    property var bgColor: Appearance.colors.colSecondaryContainer
+    // Named contentData rather than data: aliasing 'data' shadows Item's own
+    // member, which Qt warns about on every instantiation.
     default property alias contentData: sectionContent.data
 
     Layout.fillWidth: true
-    spacing: 6
+    spacing: Appearance.spacing.space100
 
     RowLayout {
-        spacing: 6
-        OptionalMaterialSymbol {
-            icon: root.icon
-            iconSize: Appearance.font.pixelSize.hugeass
+        spacing: Appearance.spacing.space100
+        MaterialShapeWrappedMaterialSymbol {
+            text: root.icon
+            iconSize: Appearance.font.pixelSize.large + 1
+            wrappedShape: root.shape
+            color: bgColor
         }
         StyledText {
             text: root.title
@@ -26,11 +33,9 @@ ColumnLayout {
             color: Appearance.colors.colOnSecondaryContainer
         }
     }
-
     ColumnLayout {
         id: sectionContent
         Layout.fillWidth: true
-        spacing: 4
-
+        spacing: Appearance.spacing.space50
     }
 }

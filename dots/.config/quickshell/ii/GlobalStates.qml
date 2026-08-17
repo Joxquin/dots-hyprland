@@ -36,6 +36,7 @@ Singleton {
     // The bar hover popup (StyledPopup) whose target widget is currently
     // hovered/pinned, morphing the shared card in BarPopupOverlay.
     property var activeBarPopup: null
+    property bool desktopWidgetKeyboardFocus: false
 
     onSidebarRightOpenChanged: {
         if (GlobalStates.sidebarRightOpen) {

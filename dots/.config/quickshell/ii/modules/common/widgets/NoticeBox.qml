@@ -7,7 +7,7 @@ Rectangle {
     id: root
     property alias materialIcon: icon.text
     property alias text: noticeText.text
-    default property alias boxData: buttonRow.data
+    default property alias data: buttonRow.data
 
     radius: Appearance.rounding.normal
     color: Appearance.colors.colPrimaryContainer
@@ -17,8 +17,8 @@ Rectangle {
     RowLayout {
         id: mainRowLayout
         anchors.fill: parent
-        anchors.margins: 8
-        spacing: 8
+        anchors.margins: Appearance.spacing.space100
+        spacing: Appearance.spacing.space100
 
         MaterialSymbol {
             id: icon
@@ -31,7 +31,7 @@ Rectangle {
 
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 4
+            spacing: Appearance.spacing.space50
 
             StyledText {
                 id: noticeText
