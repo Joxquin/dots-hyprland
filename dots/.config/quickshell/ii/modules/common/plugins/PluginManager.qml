@@ -119,9 +119,9 @@ Singleton {
     function rebuildFromLoadedFiles() {
         let loaded = [];
         let map = {};
-        [clockManifestFile, dockerManifestFile, discordVoiceManifestFile,
+        [dockerManifestFile, discordVoiceManifestFile,
                 nandoroidMediaManifestFile, nandoroidSystemMonitorManifestFile,
-                nandoroidWeatherManifestFile, nandoroidCurrencyManifestFile,
+                nandoroidCurrencyManifestFile,
                 notesManifestFile, visualizerManifestFile,
                 customImageManifestFile, imageConverterManifestFile,
                 userCardManifestFile, worldClockManifestFile,
@@ -348,12 +348,6 @@ Singleton {
     }
 
     FileView {
-        id: clockManifestFile
-        property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/clock")
-        path: Quickshell.shellPath("modules/common/plugins/bundled/clock/manifest.json")
-        onLoaded: root.scheduleRebuild()
-    }
-    FileView {
         id: dockerManifestFile
         property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/docker")
         path: Quickshell.shellPath("modules/common/plugins/bundled/docker/manifest.json")
@@ -375,12 +369,6 @@ Singleton {
         id: nandoroidSystemMonitorManifestFile
         property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-system-monitor")
         path: Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-system-monitor/manifest.json")
-        onLoaded: root.scheduleRebuild()
-    }
-    FileView {
-        id: nandoroidWeatherManifestFile
-        property string pluginBase: Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-weather")
-        path: Quickshell.shellPath("modules/common/plugins/bundled/nandoroid-weather/manifest.json")
         onLoaded: root.scheduleRebuild()
     }
     FileView {
