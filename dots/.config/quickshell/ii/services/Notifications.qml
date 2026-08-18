@@ -233,8 +233,27 @@ Singleton {
 
     function cancelTimeout(id) {
         const index = root.list.findIndex((notif) => notif.notificationId === id);
-        if (root.list[index] != null)
+        if (root.list[index] != null && root.list[index].timer != null)
             root.list[index].timer.stop();
+    }
+
+    function restartTimeout(id) {
+        const index = root.list.findIndex((notif) => notif.notificationId === id);
+        if (root.list[index] != null) {
+            if (root.list[index].timer != null) {
+                root.list[index].timer.restart();
+            } else {
+                const notifObject = root.list[index];
+                const notifServerNotif = notifServer.trackedNotifications.values.find(n => n.id + root.idOffset === id);
+                const expireTimeout = notifServerNotif?.expireTimeout ?? -1;
+                if (expireTimeout !== 0) {
+                    notifObject.timer = notifTimerComponent.createObject(root, {
+                        "notificationId": id,
+                        "interval": expireTimeout < 0 ? (Config?.options.notifications.timeout ?? 7000) : expireTimeout,
+                    });
+                }
+            }
+        }
     }
 
     function timeoutNotification(id) {
