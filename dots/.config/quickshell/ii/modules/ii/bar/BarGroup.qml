@@ -28,9 +28,7 @@ Item {
         columns: root.vertical ? 1 : -1
         anchors {
             verticalCenter: root.vertical ? undefined : parent.verticalCenter
-            horizontalCenter: root.vertical ? parent.horizontalCenter : undefined
-            left: root.vertical ? undefined : parent.left
-            right: root.vertical ? undefined : parent.right
+            horizontalCenter: parent.horizontalCenter
             top: root.vertical ? parent.top : undefined
             bottom: root.vertical ? parent.bottom : undefined
             margins: root.padding
