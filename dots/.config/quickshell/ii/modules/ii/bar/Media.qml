@@ -14,9 +14,10 @@ Item {
     property bool borderless: Config.options.bar.borderless
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
     readonly property string cleanedTitle: StringUtils.cleanMusicTitle(activePlayer?.trackTitle) || Translation.tr("No media")
+    readonly property real maxTitleWidth: 160
 
     Layout.fillHeight: true
-    implicitWidth: rowLayout.implicitWidth + rowLayout.spacing * 2
+    implicitWidth: Math.min(rowLayout.implicitWidth + rowLayout.spacing * 2, mediaCircProg.implicitSize + rowLayout.spacing * 4 + maxTitleWidth)
     implicitHeight: Appearance.sizes.barHeight
 
     Timer {
@@ -74,9 +75,9 @@ Item {
 
         StyledText {
             visible: Config.options.bar.verbose
-            width: rowLayout.width - (CircularProgress.size + rowLayout.spacing * 2)
             Layout.alignment: Qt.AlignVCenter
             Layout.fillWidth: true // Ensures the text takes up available space
+            Layout.maximumWidth: root.maxTitleWidth
             Layout.rightMargin: rowLayout.spacing
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight // Truncates the text on the right
