@@ -120,14 +120,24 @@ Singleton {
     }
 
     Timer {
+        id: diskTimer
+        interval: 30000 // Disk storage does not change rapidly; 30s cadence reduces continuous subshell spawns
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            diskProc.running = false
+            diskProc.running = true
+        }
+    }
+
+    Timer {
         interval: Config?.options.resources.updateInterval ?? 3000
         running: true
         repeat: true
         onTriggered: {
             tempProc.running = false
             tempProc.running = true
-            diskProc.running = false
-            diskProc.running = true
             if (root.gpuVendor === "nvidia") {
                 gpuProc.running = false
                 gpuProc.running = true
