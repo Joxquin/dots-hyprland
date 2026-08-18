@@ -207,6 +207,8 @@ Singleton {
         return list;
     }
 
+    property bool historyActive: (GlobalStates?.sidebarRightOpen ?? false)
+
     function updateMemoryUsageHistory() {
         memoryUsageHistory = pushHistory(memoryUsageHistory, memoryUsedPercentage)
     }
@@ -226,6 +228,7 @@ Singleton {
         vramUsageHistory = pushHistory(vramUsageHistory, vramUsedPercentage)
     }
     function updateHistories() {
+        if (!root.historyActive) return;
         updateMemoryUsageHistory()
         updateSwapUsageHistory()
         updateCpuUsageHistory()
