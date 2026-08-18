@@ -224,10 +224,6 @@ Item { // Bar content region
             spacing: 5
             layoutDirection: Qt.RightToLeft
 
-            RecordIndicator {
-                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-            }
-
             RippleButton { // Right sidebar button
                 id: rightSidebarButton
 
@@ -319,6 +315,10 @@ Item { // Bar content region
                         color: rightSidebarButton.colText
                     }
                 }
+            }
+
+            RecordIndicator {
+                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
             }
 
             SysTray {
