@@ -155,6 +155,7 @@ Scope {
                     }
 
                     Rectangle {
+                        id: previewContainer
                         Layout.preferredWidth: previewImage.paintedWidth + Appearance.spacing.space100 * 2
                         Layout.preferredHeight: previewImage.paintedHeight + Appearance.spacing.space100 * 2
                         radius: Appearance.rounding.large
@@ -177,6 +178,61 @@ Scope {
                                     width: previewImage.paintedWidth
                                     height: previewImage.paintedHeight
                                     radius: Appearance.rounding.large - Appearance.spacing.space100
+                                }
+                            }
+                        }
+
+                        // Dismiss button on hover
+                        Item {
+                            id: dismissButtonWrapper
+                            anchors {
+                                top: parent.top
+                                right: parent.right
+                                margins: Appearance.spacing.space100
+                            }
+                            width: 32
+                            height: 32
+                            opacity: popupWindow.hovered ? 1 : 0
+                            scale: popupWindow.hovered ? 1 : 0.8
+                            visible: opacity > 0
+
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: Appearance.animation.elementMoveFast.duration
+                                    easing.type: Appearance.animation.elementMoveFast.type
+                                    easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
+                                }
+                            }
+                            Behavior on scale {
+                                NumberAnimation {
+                                    duration: Appearance.animation.elementMoveFast.duration
+                                    easing.type: Appearance.animation.elementMoveFast.type
+                                    easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
+                                }
+                            }
+
+                            StyledRectangularShadow {
+                                target: dismissButton
+                            }
+
+                            RippleButton {
+                                id: dismissButton
+                                anchors.fill: parent
+                                buttonRadius: Appearance.rounding.full
+                                colBackground: Appearance.colors.colLayer1
+                                colBackgroundHover: Appearance.colors.colErrorContainer
+                                colRipple: Appearance.colors.colErrorContainerActive
+                                onClicked: root.releaseCurrent()
+
+                                MaterialSymbol {
+                                    anchors.centerIn: parent
+                                    text: "close"
+                                    iconSize: 18
+                                    color: dismissButton.hovered ? Appearance.colors.colOnErrorContainer : Appearance.colors.colOnLayer1
+                                }
+
+                                StyledToolTip {
+                                    text: Translation.tr("Dismiss")
                                 }
                             }
                         }
