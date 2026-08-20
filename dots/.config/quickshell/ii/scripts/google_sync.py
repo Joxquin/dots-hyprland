@@ -157,7 +157,13 @@ def api_request(url, access_token, method="GET", body=None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
+            if not raw:
+                return {}
+            content = raw.decode("utf-8").strip()
+            if not content:
+                return {}
+            return json.loads(content)
     except Exception as e:
         print(f"[GoogleSync] API request error ({url}): {e}")
         return None
