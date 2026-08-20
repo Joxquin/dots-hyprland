@@ -4,6 +4,8 @@ import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Quickshell
+import Quickshell.Io
 
 Item {
     id: root
@@ -115,6 +117,8 @@ Item {
         onVisibleChanged: {
             if (!visible) {
                 todoInput.text = ""
+                dialog.addFeedbackMsg = ""
+                dialog.isAdding = false
                 fabButton.focus = true
             }
         }
@@ -128,6 +132,7 @@ Item {
                 anchors.fill: parent
                 preventStealing: true
                 propagateComposedEvents: false
+                onClicked: if (!dialog.isAdding) root.showAddDialog = false
             }
         }
 
@@ -142,12 +147,54 @@ Item {
             color: Appearance.m3colors.m3surfaceContainerHigh
             radius: Appearance.rounding.normal
 
+            property bool isAdding: false
+            property string addFeedbackMsg: ""
+            property bool addFeedbackSynced: true
+            property string pendingDesc: ""
+
+            Process {
+                id: addTaskProcess
+                command: ["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-task", dialog.pendingDesc]
+                stdout: SplitParser {
+                    onRead: (data) => {
+                        if (data.includes("[RESULT]")) {
+                            try {
+                                const jsonStr = data.substring(data.indexOf("[RESULT]") + 8).trim();
+                                const res = JSON.parse(jsonStr);
+                                dialog.addFeedbackSynced = res.synced ?? false;
+                                dialog.addFeedbackMsg = res.synced ? Translation.tr("✓ Sincronizado con Google Tasks") : Translation.tr("💾 Guardado localmente");
+                            } catch (e) {
+                                dialog.addFeedbackMsg = Translation.tr("✓ Tarea agregada");
+                            }
+                        }
+                    }
+                }
+                onExited: (exitCode) => {
+                    dialog.isAdding = false;
+                    Todo.refresh();
+                    addFinishTimer.restart();
+                }
+            }
+
+            Timer {
+                id: addFinishTimer
+                interval: 1000
+                onTriggered: {
+                    todoInput.text = "";
+                    dialog.addFeedbackMsg = "";
+                    root.showAddDialog = false;
+                    tabBar.setCurrentIndex(0);
+                }
+            }
+
             function addTask() {
-                if (todoInput.text.length > 0) {
-                    Todo.addTask(todoInput.text)
-                    todoInput.text = ""
-                    root.showAddDialog = false
-                    tabBar.setCurrentIndex(0) // Show unfinished tasks
+                const desc = todoInput.text.trim();
+                if (desc.length > 0 && !dialog.isAdding) {
+                    dialog.isAdding = true;
+                    dialog.addFeedbackMsg = "";
+                    dialog.pendingDesc = desc;
+                    Todo.addItem({ "content": desc, "done": false });
+                    addTaskProcess.running = true;
                 }
             }
 
@@ -179,6 +226,7 @@ Item {
                     placeholderText: Translation.tr("Task description")
                     placeholderTextColor: Appearance.m3colors.m3outline
                     focus: root.showAddDialog
+                    enabled: !dialog.isAdding
                     onAccepted: dialog.addTask()
 
                     background: Rectangle {
@@ -196,6 +244,26 @@ Item {
                     }
                 }
 
+                StyledIndeterminateProgressBar {
+                    visible: dialog.isAdding
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.topMargin: -8
+                    Layout.bottomMargin: -8
+                }
+
+                StyledText {
+                    visible: dialog.addFeedbackMsg !== ""
+                    Layout.leftMargin: 16
+                    Layout.rightMargin: 16
+                    Layout.topMargin: -4
+                    Layout.bottomMargin: -4
+                    text: dialog.addFeedbackMsg
+                    font.pixelSize: Appearance.font.pixelSize.smaller
+                    color: dialog.addFeedbackSynced ? Appearance.colors.colPrimary : Appearance.colors.colOutlineVariant
+                }
+
                 RowLayout {
                     Layout.bottomMargin: 16
                     Layout.leftMargin: 16
@@ -205,11 +273,12 @@ Item {
 
                     DialogButton {
                         buttonText: Translation.tr("Cancel")
+                        enabled: !dialog.isAdding
                         onClicked: root.showAddDialog = false
                     }
                     DialogButton {
-                        buttonText: Translation.tr("Add")
-                        enabled: todoInput.text.length > 0
+                        buttonText: dialog.isAdding ? Translation.tr("Agregando...") : Translation.tr("Add")
+                        enabled: !dialog.isAdding && todoInput.text.trim().length > 0
                         onClicked: dialog.addTask()
                     }
                 }
