@@ -6,7 +6,7 @@ MultiEffect {
     source: wallpaper
     anchors.fill: source
     saturation: 0.2
-    blurEnabled: false
+    blurEnabled: true
     blurMax: 100
     blur: 1
 }
