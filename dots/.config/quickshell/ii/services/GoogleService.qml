@@ -40,6 +40,11 @@ Singleton {
         }
     }
 
+    function addEvent(eventObj) {
+        const jsonStr = JSON.stringify(eventObj);
+        Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-event", jsonStr]);
+    }
+
     Timer {
         interval: 300000 // Every 5 minutes
         running: true
@@ -50,7 +55,7 @@ Singleton {
 
     FileView {
         id: calendarFileView
-        path: Qt.resolvedUrl("~/.local/state/quickshell/user/calendar_events.json")
+        path: `${Directories.state}/user/calendar_events.json`
         onLoaded: {
             try {
                 root.calendarEvents = JSON.parse(calendarFileView.text());

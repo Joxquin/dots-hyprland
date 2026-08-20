@@ -233,8 +233,8 @@ def sync_calendar():
         return
 
     from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={urllib.parse.quote(now)}&maxResults=25&singleEvents=true&orderBy=startTime"
+    start_of_year = datetime(datetime.now().year, 1, 1, tzinfo=timezone.utc).isoformat()
+    url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={urllib.parse.quote(start_of_year)}&maxResults=250&singleEvents=true&orderBy=startTime"
     res = api_request(url, token)
     if not res or "items" not in res:
         return
@@ -242,11 +242,16 @@ def sync_calendar():
     events = []
     for item in res.get("items", []):
         start = item.get("start", {}).get("dateTime") or item.get("start", {}).get("date")
+        end = item.get("end", {}).get("dateTime") or item.get("end", {}).get("date")
         summary = item.get("summary", "Sin título")
         events.append({
+            "id": item.get("id", ""),
             "summary": summary,
+            "description": item.get("description", ""),
             "start": start,
+            "end": end,
             "location": item.get("location", ""),
+            "colorId": item.get("colorId", ""),
             "htmlLink": item.get("htmlLink", "")
         })
 
@@ -255,6 +260,29 @@ def sync_calendar():
         json.dump(events, f, indent=2)
 
     print(f"[GoogleSync] Synced {len(events)} calendar events!")
+
+def add_event(summary, start_time, end_time, description="", color_id=None, all_day=False):
+    auth = load_auth()
+    token = get_valid_access_token(auth)
+    if not token or not summary:
+        return
+
+    body = {
+        "summary": summary,
+        "description": description
+    }
+    if color_id:
+        body["colorId"] = str(color_id)
+
+    if all_day:
+        body["start"] = {"date": start_time}
+        body["end"] = {"date": end_time if end_time else start_time}
+    else:
+        body["start"] = {"dateTime": start_time}
+        body["end"] = {"dateTime": end_time}
+
+    api_request("https://www.googleapis.com/calendar/v3/calendars/primary/events", token, method="POST", body=body)
+    sync_calendar()
 
 def sync_all():
     sync_tasks()
@@ -279,5 +307,19 @@ if __name__ == "__main__":
     elif cmd == "delete-task":
         if len(sys.argv) > 2:
             delete_task(sys.argv[2])
+    elif cmd == "add-event":
+        if len(sys.argv) > 2:
+            try:
+                ev = json.loads(sys.argv[2])
+                add_event(
+                    summary=ev.get("summary", ""),
+                    start_time=ev.get("start", ""),
+                    end_time=ev.get("end", ""),
+                    description=ev.get("description", ""),
+                    color_id=ev.get("colorId", None),
+                    all_day=ev.get("allDay", False)
+                )
+            except Exception as e:
+                print(f"[GoogleSync] Error parsing event json: {e}")
     else:
         sync_all()
