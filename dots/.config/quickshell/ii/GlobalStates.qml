@@ -38,10 +38,47 @@ Singleton {
     property var activeBarPopup: null
     property bool desktopWidgetKeyboardFocus: false
 
+    property real lastSidebarRightDismissTime: 0
+    property real lastSidebarLeftDismissTime: 0
+
+    function toggleSidebarRight() {
+        const now = Date.now();
+        if (root.sidebarRightOpen) {
+            root.sidebarRightOpen = false;
+            root.lastSidebarRightDismissTime = now;
+        } else {
+            if (now - root.lastSidebarRightDismissTime < 250) {
+                return;
+            }
+            root.sidebarRightOpen = true;
+        }
+    }
+
+    function toggleSidebarLeft() {
+        const now = Date.now();
+        if (root.sidebarLeftOpen) {
+            root.sidebarLeftOpen = false;
+            root.lastSidebarLeftDismissTime = now;
+        } else {
+            if (now - root.lastSidebarLeftDismissTime < 250) {
+                return;
+            }
+            root.sidebarLeftOpen = true;
+        }
+    }
+
     onSidebarRightOpenChanged: {
         if (GlobalStates.sidebarRightOpen) {
             Notifications.timeoutAll();
             Notifications.markAllRead();
+        } else {
+            lastSidebarRightDismissTime = Date.now();
+        }
+    }
+
+    onSidebarLeftOpenChanged: {
+        if (!GlobalStates.sidebarLeftOpen) {
+            lastSidebarLeftDismissTime = Date.now();
         }
     }
 

@@ -71,7 +71,7 @@ Scope {
         target: "sidebarRight"
 
         function toggle(): void {
-            GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
+            GlobalStates.toggleSidebarRight();
         }
 
         function close(): void {
@@ -88,7 +88,7 @@ Scope {
         description: "Toggles right sidebar on press"
 
         onPressed: {
-            GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
+            GlobalStates.toggleSidebarRight();
         }
     }
     GlobalShortcut {

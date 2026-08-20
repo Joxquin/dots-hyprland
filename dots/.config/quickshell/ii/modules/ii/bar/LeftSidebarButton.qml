@@ -26,7 +26,7 @@ RippleButton {
     toggled: GlobalStates.sidebarLeftOpen
 
     onPressed: {
-        GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen;
+        GlobalStates.toggleSidebarLeft();
     }
 
     Connections {

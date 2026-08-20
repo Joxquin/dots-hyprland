@@ -19,6 +19,14 @@ Singleton {
 
     function dismiss() {
         root.dismissable = [];
+        if (GlobalStates.sidebarRightOpen) {
+            GlobalStates.sidebarRightOpen = false;
+            GlobalStates.lastSidebarRightDismissTime = Date.now();
+        }
+        if (GlobalStates.sidebarLeftOpen) {
+            GlobalStates.sidebarLeftOpen = false;
+            GlobalStates.lastSidebarLeftDismissTime = Date.now();
+        }
         root.dismissed();
     }
 
