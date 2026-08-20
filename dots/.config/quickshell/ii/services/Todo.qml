@@ -28,32 +28,45 @@ Singleton {
             "done": false,
         }
         addItem(item)
+        Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-task", desc]);
     }
 
     function markDone(index) {
         if (index >= 0 && index < list.length) {
+            const gtaskId = list[index].gtask_id ?? "";
             list[index].done = true
             // Reassign to trigger onListChanged
             root.list = list.slice(0)
             todoFileView.setText(JSON.stringify(root.list))
+            if (gtaskId) {
+                Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "update-task", gtaskId, "true"]);
+            }
         }
     }
 
     function markUnfinished(index) {
         if (index >= 0 && index < list.length) {
+            const gtaskId = list[index].gtask_id ?? "";
             list[index].done = false
             // Reassign to trigger onListChanged
             root.list = list.slice(0)
             todoFileView.setText(JSON.stringify(root.list))
+            if (gtaskId) {
+                Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "update-task", gtaskId, "false"]);
+            }
         }
     }
 
     function deleteItem(index) {
         if (index >= 0 && index < list.length) {
+            const gtaskId = list[index].gtask_id ?? "";
             list.splice(index, 1)
             // Reassign to trigger onListChanged
             root.list = list.slice(0)
             todoFileView.setText(JSON.stringify(root.list))
+            if (gtaskId) {
+                Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "delete-task", gtaskId]);
+            }
         }
     }
 
