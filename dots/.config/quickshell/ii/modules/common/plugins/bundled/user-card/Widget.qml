@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
 import Quickshell
+import Quickshell.Io
 import qs
 import qs.services
 import qs.modules.common
@@ -47,22 +48,26 @@ Item {
     property int blurMargin: Appearance.spacing.space250
     property int avatarSize: 64
     property string hostname: SystemInfo.hostname
-    property string username: Config.options.profile.displayName === "" ? SystemInfo.username : Config.options.profile.displayName
-    property string userDisplay: username.length > 10 ? username : (username + "@" + hostname)
+    property string username: (Config.options.profile?.displayName ?? "") === "" ? SystemInfo.username : Config.options.profile.displayName
+    property string userDisplay: "@" + username
     property var currentQuip: weatherQuip()
 
     function weatherQuip() {
         const desc = (Weather.data?.description ?? "").toLowerCase();
-        const temp = Weather.data?.temp ?? "--";
+        const rawTemp = Weather.data?.temp;
+        const tempValid = typeof rawTemp === "number" && !isNaN(rawTemp);
+        const tempText = tempValid ? `${Math.round(rawTemp)}°C` : "";
         if (desc.includes("rain"))
-            return { text: `• raining, grab a coffee`, icon: "coffee" };
+            return { text: `• raining, grab a coffee ${tempText}`.trim(), icon: "coffee" };
         if (desc.includes("clear"))
-            return { text: `• good day to touch grass`, icon: "eco" };
+            return { text: `• good day to touch grass ${tempText}`.trim(), icon: "eco" };
         if (desc.includes("cloud"))
-            return { text: `• a bit cloudy today`, icon: "cloud" };
+            return { text: `• a bit cloudy today ${tempText}`.trim(), icon: "cloud" };
         if (desc.includes("snow"))
-            return { text: `• snowing`, icon: "ac_unit" };
-        return { text: `• ${Weather.data?.description ?? ""}`, icon: "thermostat" };
+            return { text: `• snowing ${tempText}`.trim(), icon: "ac_unit" };
+        if (desc.length > 0)
+            return { text: `• ${Weather.data?.description} ${tempText}`.trim(), icon: "thermostat" };
+        return { text: tempText.length > 0 ? `• ${tempText}` : `• ${SystemInfo.distroName}`, icon: "thermostat" };
     }
 
     // The tokens, not the component. Three surfaces sit on this widget - a
@@ -185,7 +190,7 @@ Item {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: GlobalStates.settingsOpen = true
+                            onClicked: Quickshell.execDetached(["qs", "-p", Quickshell.shellPath("settings.qml")])
                         }
                     }
 
@@ -227,13 +232,38 @@ Item {
             border.color: Appearance.colors.colLayer1
             z: 2
 
+            Process {
+                id: avatarPickerProc
+                stdout: StdioCollector {
+                    onStreamFinished: {
+                        const file = text.trim();
+                        if (file.length > 0) {
+                            Config.options.profile.avatarPath = file;
+                        }
+                    }
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: avatarPickerProc.exec(["bash", "-c", "zenity --file-selection --title='Select Profile Picture' --file-filter='Images | *.png *.jpg *.jpeg *.webp' 2>/dev/null || kdialog --getopenfilename ~ 'Image Files (*.png *.jpg *.jpeg *.webp)' 2>/dev/null"])
+                StyledToolTip {
+                    text: Translation.tr("Click to change profile picture")
+                }
+            }
+
             Image {
                 id: avatarImage
                 anchors.fill: parent
                 anchors.margins: Appearance.spacing.space50
-                source: Config.options.profile.avatarPath !== ""
-                    ? "file://" + Config.options.profile.avatarPicture
-                    : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
+                source: {
+                    const custom = Config.options.profile?.avatarPath ?? "";
+                    if (custom.length > 0) return custom.startsWith("file://") ? custom : "file://" + custom;
+                    const sys = SystemInfo.userAvatarPath ?? "";
+                    if (sys.length > 0 && !sys.includes("/var/lib/AccountsService/icons/")) return sys.startsWith("file://") ? sys : "file://" + sys;
+                    return Directories.home + ".face";
+                }
                 sourceSize.width: avatarImage.width * 2
                 sourceSize.height: avatarImage.height * 2
                 fillMode: Image.PreserveAspectCrop
@@ -256,7 +286,7 @@ Item {
                 text: "account_circle"
                 iconSize: 32
                 color: Appearance.colors.colOnPrimaryContainer
-                visible: avatarImage.status === Image.Error
+                visible: avatarImage.status === Image.Error || avatarImage.status === Image.Null
             }
         }
 
