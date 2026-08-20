@@ -139,6 +139,16 @@ Singleton {
                 }
             }
 
+            property JsonObject plugins: JsonObject {
+                property list<string> enabled: []
+                property bool storeEnabled: false
+                property real blurOpacity: 0.1
+                property string frostMode: "blur"
+                property bool migratedDesktopWidgets: true
+                property bool migratedDesktopWidgetOptions: true
+                property bool migratedWorldClockTimezones: true
+            }
+
             property JsonObject audio: JsonObject {
                 // Values in %
                 property JsonObject protection: JsonObject {
@@ -375,7 +385,7 @@ Singleton {
                 property bool useHyprlock: false
                 property bool launchOnStartup: false
                 property JsonObject blur: JsonObject {
-                    property bool enable: true
+                    property bool enable: false
                     property real radius: 100
                     property real extraZoom: 1.1
                 }
@@ -467,6 +477,10 @@ Singleton {
                 property bool invertPinnedItems: true // Makes the below a whitelist for the tray and blacklist for the pinned area
                 property list<var> pinnedItems: [ "Fcitx" ]
                 property bool filterPassive: true
+            }
+
+            property JsonObject notes: JsonObject {
+                property bool importedLegacyStore: false
             }
 
             property JsonObject musicRecognition: JsonObject {

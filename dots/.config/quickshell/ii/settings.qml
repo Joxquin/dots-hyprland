@@ -55,6 +55,11 @@ ApplicationWindow {
             component: "modules/settings/ServicesConfig.qml"
         },
         {
+            name: Translation.tr("Widgets"),
+            icon: "widgets",
+            component: "modules/settings/PluginsPage.qml"
+        },
+        {
             name: Translation.tr("Advanced"),
             icon: "construction",
             component: "modules/settings/AdvancedConfig.qml"

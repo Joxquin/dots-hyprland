@@ -16,7 +16,8 @@ MouseArea { // Notification group area
     property var notifications: notificationGroup?.notifications ?? []
     property int notificationCount: notifications.length
     property bool multipleNotifications: notificationCount > 1
-    property bool expanded: false
+    property bool manualExpanded: false
+    property bool expanded: (popup && containsMouse) || manualExpanded
     property bool popup: false
     property real padding: 10
     implicitHeight: background.implicitHeight
@@ -39,15 +40,24 @@ MouseArea { // Notification group area
         destroyAnimation.running = true;
     }
 
+    function toggleExpanded() {
+        if (expanded) implicitHeightAnim.enabled = true;
+        else implicitHeightAnim.enabled = false;
+        root.manualExpanded = !root.manualExpanded;
+    }
+
     hoverEnabled: true
     onContainsMouseChanged: {
         if (!root.popup) return;
-        if (root.containsMouse) root.notifications.forEach(notif => {
-            Notifications.cancelTimeout(notif.notificationId);
-        });
-        else root.notifications.forEach(notif => {
-            Notifications.timeoutNotification(notif.notificationId);
-        });
+        if (root.containsMouse) {
+            root.notifications.forEach(notif => {
+                Notifications.cancelTimeout(notif.notificationId);
+            });
+        } else {
+            root.notifications.forEach(notif => {
+                Notifications.restartTimeout(notif.notificationId);
+            });
+        }
     }
 
     SequentialAnimation { // Drag finish animation
@@ -70,12 +80,6 @@ MouseArea { // Notification group area
                 });
             });
         }
-    }
-
-    function toggleExpanded() {
-        if (expanded) implicitHeightAnim.enabled = true;
-        else implicitHeightAnim.enabled = false;
-        root.expanded = !root.expanded;
     }
 
     DragManager { // Drag manager

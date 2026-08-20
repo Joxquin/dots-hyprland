@@ -1,6 +1,8 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import qs
+import qs.services
 import qs.modules.common
 import QtQuick
 import Quickshell
@@ -120,14 +122,24 @@ Singleton {
     }
 
     Timer {
+        id: diskTimer
+        interval: 30000 // Disk storage does not change rapidly; 30s cadence reduces continuous subshell spawns
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            diskProc.running = false
+            diskProc.running = true
+        }
+    }
+
+    Timer {
         interval: Config?.options.resources.updateInterval ?? 3000
         running: true
         repeat: true
         onTriggered: {
             tempProc.running = false
             tempProc.running = true
-            diskProc.running = false
-            diskProc.running = true
             if (root.gpuVendor === "nvidia") {
                 gpuProc.running = false
                 gpuProc.running = true
@@ -191,31 +203,34 @@ Singleton {
         };
     }
 
+    function pushHistory(list, value) {
+        list.push(value);
+        if (list.length > historyLength) list.shift();
+        return list;
+    }
+
+    property bool historyActive: (GlobalStates?.sidebarRightOpen ?? false)
+
     function updateMemoryUsageHistory() {
-        memoryUsageHistory = [...memoryUsageHistory, memoryUsedPercentage]
-        if (memoryUsageHistory.length > historyLength) memoryUsageHistory.shift()
+        memoryUsageHistory = pushHistory(memoryUsageHistory, memoryUsedPercentage)
     }
     function updateSwapUsageHistory() {
-        swapUsageHistory = [...swapUsageHistory, swapUsedPercentage]
-        if (swapUsageHistory.length > historyLength) swapUsageHistory.shift()
+        swapUsageHistory = pushHistory(swapUsageHistory, swapUsedPercentage)
     }
     function updateCpuUsageHistory() {
-        cpuUsageHistory = [...cpuUsageHistory, cpuUsage]
-        if (cpuUsageHistory.length > historyLength) cpuUsageHistory.shift()
+        cpuUsageHistory = pushHistory(cpuUsageHistory, cpuUsage)
     }
     function updateDiskUsageHistory() {
-        diskUsageHistory = [...diskUsageHistory, diskUsedPercentage]
-        if (diskUsageHistory.length > historyLength) diskUsageHistory.shift()
+        diskUsageHistory = pushHistory(diskUsageHistory, diskUsedPercentage)
     }
     function updateGpuUsageHistory() {
-        gpuUsageHistory = [...gpuUsageHistory, gpuUsage]
-        if (gpuUsageHistory.length > historyLength) gpuUsageHistory.shift()
+        gpuUsageHistory = pushHistory(gpuUsageHistory, gpuUsage)
     }
     function updateVramUsageHistory() {
-        vramUsageHistory = [...vramUsageHistory, vramUsedPercentage]
-        if (vramUsageHistory.length > historyLength) vramUsageHistory.shift()
+        vramUsageHistory = pushHistory(vramUsageHistory, vramUsedPercentage)
     }
     function updateHistories() {
+        if (!root.historyActive) return;
         updateMemoryUsageHistory()
         updateSwapUsageHistory()
         updateCpuUsageHistory()

@@ -11,7 +11,13 @@ pkgver=0.1.0.r1
 pkgrel=8
 pkgdesc="$_pkgname-git pinned commit and extra deps for $_prefix"
 arch=(x86_64 aarch64)
-url='https://git.outfoxxed.me/quickshell/quickshell'
+_primary_url='https://git.outfoxxed.me/quickshell/quickshell'
+_mirror_url='https://github.com/quickshell-mirror/quickshell'
+if curl -s --head --connect-timeout 3 --max-time 5 "$_primary_url" >/dev/null 2>&1; then
+  url="$_primary_url"
+else
+  url="$_mirror_url"
+fi
 options=(!strip)
 license=('LGPL-3.0-only')
 depends=(

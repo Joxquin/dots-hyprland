@@ -24,6 +24,7 @@ ButtonMouseArea {
     property bool superPressAndHeld: false // Relevant modifications at bottom of file
 
     property real workspaceButtonWidth: 26
+    property real widgetPadding: 5
     property real activeWorkspaceMargin: 2
     property real activeWorkspaceSize: workspaceButtonWidth - activeWorkspaceMargin * 2
     property real workspaceIconSize: workspaceButtonWidth * 0.69
@@ -86,7 +87,7 @@ ButtonMouseArea {
         layer.enabled: root.specialBlur > 0
         layer.effect: MultiEffect {
             brightness: -0.1 * root.specialBlur
-            blurEnabled: true
+            blurEnabled: false
             blur: root.specialBlur
             blurMax: 32
         }

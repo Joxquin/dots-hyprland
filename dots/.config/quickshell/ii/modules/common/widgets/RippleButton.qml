@@ -16,6 +16,10 @@ Button {
     property real buttonRadius: Appearance?.rounding?.small ?? 4
     property real buttonRadiusPressed: buttonRadius
     property real buttonEffectiveRadius: root.down ? root.buttonRadiusPressed : root.buttonRadius
+    property real cornerTopLeft: root.buttonEffectiveRadius
+    property real cornerTopRight: root.buttonEffectiveRadius
+    property real cornerBottomLeft: root.buttonEffectiveRadius
+    property real cornerBottomRight: root.buttonEffectiveRadius
     property int rippleDuration: 1200
     property bool rippleEnabled: true
     property var downAction // When left clicking (down)

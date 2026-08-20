@@ -17,6 +17,7 @@ import Quickshell.Hyprland
 import qs.modules.ii.background.widgets
 import qs.modules.ii.background.widgets.clock
 import qs.modules.ii.background.widgets.weather
+import qs.modules.common.plugins
 
 Variants {
     id: root
@@ -274,6 +275,39 @@ Variants {
                         scaledScreenHeight: bgRoot.screen.height
                         wallpaperScale: 1
                         wallpaperSafetyTriggered: bgRoot.wallpaperSafetyTriggered
+                    }
+                }
+
+                Repeater {
+                    model: PluginManager.availablePlugins
+
+                    FadeLoader {
+                        id: pluginLoader
+
+                        required property var modelData
+                        shown: modelData.desktopWidget !== undefined
+                            && modelData.startupSafe !== false
+                            && Config.options.plugins.enabled.includes(modelData.id)
+
+                        enterDuration: Appearance.animation.elementMoveEnter.duration
+                        enterEasingCurve: Appearance.animation.elementMoveEnter.bezierCurve
+                        exitDuration: Appearance.animation.elementMoveExit.duration
+                        exitEasingCurve: Appearance.animation.elementMoveExit.bezierCurve
+
+                        sourceComponent: PluginWidget {
+                            manifest: pluginLoader.modelData
+                            screenName: bgRoot.screen.name
+                            screenWidth: bgRoot.screen.width
+                            screenHeight: bgRoot.screen.height
+                            scaledScreenWidth: bgRoot.screen.width
+                            scaledScreenHeight: bgRoot.screen.height
+                            wallpaperScale: 1
+                            wallpaperPath: bgRoot.wallpaperPath
+                            wallpaperSafetyTriggered: bgRoot.wallpaperSafetyTriggered
+                            canvasOffsetX: widgetCanvas.x
+                            canvasOffsetY: widgetCanvas.y
+                            wallpaperRect: Qt.rect(wallpaper.x, wallpaper.y, wallpaper.width, wallpaper.height)
+                        }
                     }
                 }
             }

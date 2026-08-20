@@ -122,7 +122,7 @@ Scope {
                 const targetWindow = target.QsWindow.window;
                 const barWinHeight = targetWindow.height > 0 ? targetWindow.height : (Appearance.sizes.barHeight + Appearance.rounding.screenRounding);
                 const barWinWidth = targetWindow.width > 0 ? targetWindow.width : (Appearance.sizes.verticalBarWidth + Appearance.rounding.screenRounding);
-                const barGap = 28;
+                const barGap = -15;
 
                 let cardX;
                 let cardY;
@@ -155,7 +155,7 @@ Scope {
                 const targetWindow = target.QsWindow.window;
                 const barWinHeight = targetWindow.height > 0 ? targetWindow.height : (Appearance.sizes.barHeight + Appearance.rounding.screenRounding);
                 const barWinWidth = targetWindow.width > 0 ? targetWindow.width : (Appearance.sizes.verticalBarWidth + Appearance.rounding.screenRounding);
-                const barGap = 28;
+                const barGap = -15;
 
                 const margin = Appearance.sizes.elevationMargin;
                 const floor = margin * 2;

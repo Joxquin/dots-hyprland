@@ -1,11 +1,14 @@
 import QtQuick
 import Quickshell
 import qs.modules.common.functions
+import "interaction_motion.js" as InteractionMotion
 pragma Singleton
 pragma ComponentBehavior: Bound
 
 Singleton {
     id: root
+    // Compatibility scale used by expressive widget library
+    readonly property real effectiveScale: 1.0
     property QtObject m3colors
     property QtObject animation
     property QtObject animationCurves
@@ -15,6 +18,8 @@ Singleton {
     property QtObject borderWidth
     property QtObject font
     property QtObject sizes
+    property QtObject interaction
+    property QtObject elevation
     property string syntaxHighlightingTheme
 
     // Transparency. The quadratic functions were derived from analysis of hand-picked transparency values.
@@ -202,6 +207,7 @@ Singleton {
 
     rounding: QtObject {
         property int unsharpen: 2
+        property int unsharpenslight: 4
         property int unsharpenmore: 6
         property int verysmall: 8
         property int small: 12
@@ -211,6 +217,10 @@ Singleton {
         property int full: 9999
         property int screenRounding: large
         property int windowRounding: 18
+
+        property int button: small
+        property int card: normal
+        property int extraLarge: verylarge
     }
 
     spacing: QtObject {
@@ -290,6 +300,57 @@ Singleton {
         readonly property real expressiveEffectsDuration: 200
     }
 
+    interaction: QtObject {
+        id: interactionModel
+
+        // Multipliers on whatever geometry the control already has.
+        readonly property real hoverScale: 1.02
+        readonly property real pressScale: 0.97
+        readonly property real pressRadiusScale: 0.85
+        readonly property real disabledOpacity: 0.4
+
+        readonly property var tokens: ({
+            hoverScale: interactionModel.hoverScale,
+            pressScale: interactionModel.pressScale,
+            pressRadiusScale: interactionModel.pressRadiusScale,
+            disabledOpacity: interactionModel.disabledOpacity
+        })
+
+        // The tiers, on the shell's existing curves. The press tier is the
+        // fastest one there is because a press must be acknowledged before
+        // anything else; the release is longer AND lands on the spatial curve
+        // whose control points leave the unit box, so it springs back rather
+        // than deflating.
+        readonly property var tiers: ({
+            hoverIn: { duration: root.animationCurves.expressiveEffectsDuration,
+                       curve: root.animationCurves.expressiveEffects },
+            hoverOut: { duration: Math.round(root.animationCurves.expressiveEffectsDuration * 1.25),
+                        curve: root.animationCurves.expressiveEffects },
+            press: { duration: 150, curve: root.animationCurves.expressiveEffects },
+            release: { duration: root.animationCurves.expressiveFastSpatialDuration,
+                       curve: root.animationCurves.expressiveFastSpatial },
+            instant: { duration: 0, curve: root.animationCurves.standard },
+            hold: { duration: 0, curve: root.animationCurves.standard }
+        })
+
+        function state(flags) { return InteractionMotion.stateOf(flags); }
+        function targets(state) { return InteractionMotion.targetsFor(state, interactionModel.tokens); }
+        function transition(fromState, toState) {
+            return InteractionMotion.transitionFor(fromState, toState, interactionModel.tiers);
+        }
+    }
+
+    // The desktop card's elevation.
+    elevation: QtObject {
+        readonly property real blur: 0.51
+        readonly property real shadowOpacity: 0.50
+        readonly property real offsetY: 4.0
+        readonly property real shadowScale: 1.00
+        readonly property real hoverLift: 1.94
+        readonly property real dragLift: 2.65
+        readonly property color shadowColor: root.m3colors.m3shadow
+    }
+
     animation: QtObject {
         property QtObject elementMove: QtObject {
             property int duration: animationCurves.expressiveDefaultSpatialDuration
@@ -367,6 +428,24 @@ Singleton {
             }}
         }
 
+        property QtObject elementMoveFaster: QtObject {
+            property int duration: 150
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.expressiveEffects
+            property int velocity: 850
+            property Component colorAnimation: Component { ColorAnimation {
+                duration: root.animation.elementMoveFaster.duration
+                easing.type: root.animation.elementMoveFaster.type
+                easing.bezierCurve: root.animation.elementMoveFaster.bezierCurve
+            }}
+            property Component numberAnimation: Component { NumberAnimation {
+                alwaysRunToEnd: true
+                duration: root.animation.elementMoveFaster.duration
+                easing.type: root.animation.elementMoveFaster.type
+                easing.bezierCurve: root.animation.elementMoveFaster.bezierCurve
+            }}
+        }
+
         property QtObject elementResize: QtObject {
             property int duration: 300
             property int type: Easing.BezierSpline
@@ -378,6 +457,19 @@ Singleton {
                     duration: root.animation.elementResize.duration
                     easing.type: root.animation.elementResize.type
                     easing.bezierCurve: root.animation.elementResize.bezierCurve
+                }
+            }
+        }
+
+        property QtObject elementFade: QtObject {
+            property int duration: 200
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: root.animationCurves.standardDecel
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    duration: root.animation.elementFade.duration
+                    easing.type: root.animation.elementFade.type
+                    easing.bezierCurve: root.animation.elementFade.bezierCurve
                 }
             }
         }
@@ -404,6 +496,36 @@ Singleton {
         property QtObject menuDecel: QtObject {
             property int duration: 350
             property int type: Easing.OutExpo
+        }
+
+        property QtObject sidebarSlideEnter: QtObject {
+            property int duration: 300
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.standardDecel
+            property int velocity: 650
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    alwaysRunToEnd: true
+                    duration: root.animation.sidebarSlideEnter.duration
+                    easing.type: root.animation.sidebarSlideEnter.type
+                    easing.bezierCurve: root.animation.sidebarSlideEnter.bezierCurve
+                }
+            }
+        }
+
+        property QtObject sidebarSlideExit: QtObject {
+            property int duration: 250
+            property int type: Easing.BezierSpline
+            property list<real> bezierCurve: animationCurves.standardAccel
+            property int velocity: 650
+            property Component numberAnimation: Component {
+                NumberAnimation {
+                    alwaysRunToEnd: true
+                    duration: root.animation.sidebarSlideExit.duration
+                    easing.type: root.animation.sidebarSlideExit.type
+                    easing.bezierCurve: root.animation.sidebarSlideExit.bezierCurve
+                }
+            }
         }
     }
 
@@ -435,6 +557,17 @@ Singleton {
         property real wallpaperSelectorHeight: 690
         property real wallpaperSelectorItemMargins: 8
         property real wallpaperSelectorItemPadding: 6
+
+        // Component grid for desktop-widget plugins
+        property real widgetGridCellWidth: 132
+        property real widgetGridCellHeight: 108
+        property real widgetGridGap: 12
+        function widgetGridSpanX(cols) {
+            return (cols * root.sizes.widgetGridCellWidth + (cols - 1) * root.sizes.widgetGridGap) * root.effectiveScale;
+        }
+        function widgetGridSpanY(rows) {
+            return (rows * root.sizes.widgetGridCellHeight + (rows - 1) * root.sizes.widgetGridGap) * root.effectiveScale;
+        }
     }
 
     syntaxHighlightingTheme: root.m3colors.darkmode ? "Monokai" : "ayu Light"
