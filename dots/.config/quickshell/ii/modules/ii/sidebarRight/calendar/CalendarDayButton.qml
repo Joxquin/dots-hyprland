@@ -8,6 +8,9 @@ RippleButton {
     property string day
     property int isToday
     property bool bold
+    property var dateObject
+
+    signal dayClicked(var date)
 
     Layout.fillWidth: false
     Layout.fillHeight: false
@@ -16,6 +19,12 @@ RippleButton {
 
     toggled: (isToday == 1)
     buttonRadius: Appearance.rounding.small
+
+    onClicked: {
+        if (button.dateObject) {
+            button.dayClicked(button.dateObject);
+        }
+    }
     
     contentItem: StyledText {
         anchors.fill: parent
