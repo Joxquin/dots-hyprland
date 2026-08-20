@@ -398,6 +398,11 @@ Singleton {
                 property bool materialShapeChars: true
             }
 
+            property JsonObject profile: JsonObject {
+                property string displayName: ""
+                property string avatarPath: ""
+            }
+
             property JsonObject media: JsonObject {
                 // Attempt to remove dupes (the aggregator playerctl one and browsers' native ones when there's plasma browser integration)
                 property bool filterDuplicatePlayers: true
