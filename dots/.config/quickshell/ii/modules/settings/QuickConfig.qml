@@ -324,6 +324,78 @@ ContentPage {
         }
     }
 
+    // Google Sync (Tasks & Calendar)
+    ContentSection {
+        id: googleSyncSection
+        icon: "cloud_sync"
+        title: Translation.tr("Google Sync (Tasks & Calendar)")
+
+        function saveGauth() {
+            const id = clientIdInput.text.trim();
+            const secret = clientSecretInput.text.trim();
+            const cmd = `mkdir -p ~/.config/illogical-impulse && cat << 'EOF' > ~/.config/illogical-impulse/gauth.json\n{\n  "client_id": "${id}",\n  "client_secret": "${secret}",\n  "access_token": "",\n  "refresh_token": ""\n}\nEOF`;
+            Quickshell.execDetached(["bash", "-c", cmd]);
+        }
+
+        FileView {
+            id: gauthFileView
+            path: `${Directories.config}/illogical-impulse/gauth.json`
+            onLoaded: {
+                try {
+                    const data = JSON.parse(gauthFileView.text());
+                    clientIdInput.text = data.client_id ?? "";
+                    clientSecretInput.text = data.client_secret ?? "";
+                } catch (e) {}
+            }
+        }
+
+        ConfigRow {
+            ContentSubsection {
+                title: Translation.tr("Google Client ID")
+                Layout.fillWidth: true
+
+                ToolbarTextField {
+                    id: clientIdInput
+                    Layout.fillWidth: true
+                    placeholderText: "347070894088-...apps.googleusercontent.com"
+                    onEditingFinished: googleSyncSection.saveGauth()
+                }
+            }
+        }
+
+        ConfigRow {
+            ContentSubsection {
+                title: Translation.tr("Google Client Secret")
+                Layout.fillWidth: true
+
+                ToolbarTextField {
+                    id: clientSecretInput
+                    Layout.fillWidth: true
+                    echoMode: TextInput.Password
+                    placeholderText: "GOCSPX-..."
+                    onEditingFinished: googleSyncSection.saveGauth()
+                }
+            }
+        }
+
+        ConfigRow {
+            ContentSubsection {
+                title: Translation.tr("Google Account")
+                Layout.fillWidth: true
+
+                RippleButtonWithIcon {
+                    Layout.fillWidth: false
+                    materialIcon: "account_circle"
+                    mainText: Translation.tr("Conectar cuenta de Google")
+                    onClicked: {
+                        googleSyncSection.saveGauth();
+                        Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "login"]);
+                    }
+                }
+            }
+        }
+    }
+
     NoticeBox {
         Layout.fillWidth: true
         text: Translation.tr('Not all options are available in this app. You should also check the config file by hitting the "Config file" button on the topleft corner or opening %1 manually.').arg(Directories.shellConfigPath)
