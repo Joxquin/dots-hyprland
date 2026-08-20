@@ -273,15 +273,20 @@ StyledRectangle {
             // page recreates every card, and the enabled ones come back open.
             // Assigned rather than animated - a card that appears already open
             // should not play an entrance it never closed from.
+            Binding {
+                target: panel
+                property: "implicitHeight"
+                value: panel.targetHeight
+                when: root.expanded && !expandAnim.running && !collapseAnim.running
+            }
+
             Component.onCompleted: {
                 if (root.expanded)
                     panel.implicitHeight = panel.targetHeight;
             }
 
-            // Content that grows while already open (a status line arriving,
-            // say) follows without re-running the entrance.
             onTargetHeightChanged: {
-                if (root.expanded && !expandAnim.running)
+                if (root.expanded && !expandAnim.running && !collapseAnim.running)
                     panel.implicitHeight = panel.targetHeight;
             }
             Behavior on opacity {
