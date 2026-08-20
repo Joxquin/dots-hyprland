@@ -57,8 +57,11 @@ RippleButton {
     font.pixelSize: Appearance.font.pixelSize.small
 
     onClicked: {
+        const oldChecked = root.checked;
         root.toggleRequested();
-        root.checked = !root.checked;
+        if (root.checked === oldChecked) {
+            root.checked = !oldChecked;
+        }
     }
 
     contentItem: ColumnLayout {
