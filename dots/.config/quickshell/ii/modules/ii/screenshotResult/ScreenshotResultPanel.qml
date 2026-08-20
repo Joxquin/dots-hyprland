@@ -30,7 +30,7 @@ Scope {
             // Replacing an existing popup discards the old file (same rules
             // as timeout).
             if (root.currentPath !== "" && root.currentPath !== path)
-                root.releaseCurrent();
+                root.releaseCurrent(false);
             root.currentPath = path;
             dismissTimer.restart();
         }
@@ -38,10 +38,15 @@ Scope {
 
     // Discard, timeout and replacement all use the same rule: scratch files
     // are deleted, user-saved files (CTRL+Print target) are always kept.
-    function releaseCurrent() {
+    // Clipboard history is ONLY cleared when clearClipboard = true (Trash button).
+    function releaseCurrent(clearClipboard = false) {
         if (root.currentPath === "") return;
         if (root.fileIsScratch)
             Quickshell.execDetached(["rm", "-f", "--", root.currentPath]);
+        if (clearClipboard) {
+            Quickshell.execDetached(["bash", "-c", "cliphist list | head -n 1 | cliphist delete 2>/dev/null; wl-copy --clear 2>/dev/null"]);
+            Cliphist.refresh();
+        }
         root.currentPath = "";
     }
 
@@ -91,7 +96,7 @@ Scope {
         interval: Config.options.screenshotResult?.timeoutMs ?? 6000
         onTriggered: {
             if (panelLoader.item?.hovered) { dismissTimer.restart(); return; }
-            root.releaseCurrent();
+            root.releaseCurrent(false);
         }
     }
 
@@ -285,7 +290,7 @@ Scope {
                                 implicitWidth: 44; implicitHeight: 44
                                 colBackgroundHover: Appearance.colors.colErrorContainerHover
                                 colRipple: Appearance.colors.colErrorContainerActive
-                                onClicked: root.releaseCurrent()
+                                onClicked: root.releaseCurrent(true)
                                 MaterialSymbol { anchors.centerIn: parent; text: "delete"; iconSize: 22; color: Appearance.colors.colError }
                                 StyledToolTip { text: Translation.tr("Discard") }
                             }
