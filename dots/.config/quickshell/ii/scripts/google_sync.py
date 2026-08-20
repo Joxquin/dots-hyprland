@@ -203,29 +203,49 @@ def sync_tasks():
 def add_task(title):
     auth = load_auth()
     token = get_valid_access_token(auth)
-    if not token:
+    if not title:
+        print(f"[RESULT]{json.dumps({'success': False, 'message': 'Título vacío'})}")
         return
-    body = {"title": title}
-    api_request("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", token, method="POST", body=body)
-    sync_tasks()
+    result = {"success": True, "synced": False, "message": "Guardado localmente"}
+    if token:
+        resp = api_request("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", token, method="POST", body={"title": title})
+        if resp and "id" in resp:
+            sync_tasks()
+            result = {"success": True, "synced": True, "message": "Sincronizado con Google Tasks"}
+    print(f"[RESULT]{json.dumps(result)}")
+    return result
 
 def update_task_status(task_id, done):
     auth = load_auth()
     token = get_valid_access_token(auth)
-    if not token or not task_id:
+    if not task_id:
+        print(f"[RESULT]{json.dumps({'success': False, 'message': 'ID no válido'})}")
         return
     status = "completed" if done else "needsAction"
     body = {"status": status}
-    api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="PATCH", body=body)
-    sync_tasks()
+    result = {"success": True, "synced": False, "message": "Actualizado localmente"}
+    if token:
+        resp = api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="PATCH", body=body)
+        if resp is not None:
+            sync_tasks()
+            result = {"success": True, "synced": True, "message": "Sincronizado con Google Tasks"}
+    print(f"[RESULT]{json.dumps(result)}")
+    return result
 
 def delete_task(task_id):
     auth = load_auth()
     token = get_valid_access_token(auth)
-    if not token or not task_id:
+    if not task_id:
+        print(f"[RESULT]{json.dumps({'success': False, 'message': 'ID no válido'})}")
         return
-    api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="DELETE")
-    sync_tasks()
+    result = {"success": True, "synced": False, "message": "Eliminado localmente"}
+    if token:
+        resp = api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="DELETE")
+        if resp is not None:
+            sync_tasks()
+            result = {"success": True, "synced": True, "message": "Eliminado de Google Tasks"}
+    print(f"[RESULT]{json.dumps(result)}")
+    return result
 
 def sync_calendar():
     auth = load_auth()

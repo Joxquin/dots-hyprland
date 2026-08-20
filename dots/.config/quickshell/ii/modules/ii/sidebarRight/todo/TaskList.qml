@@ -6,6 +6,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 
 Item {
     id: root
@@ -30,6 +31,60 @@ Item {
             property bool pendingDoneToggle: false
             property bool pendingDelete: false
             property bool enableHeightAnimation: false
+
+            property bool isUpdating: false
+            property bool isDeleting: false
+            property string feedbackMsg: ""
+            property bool feedbackSynced: true
+
+            Process {
+                id: actionProcess
+                property string pendingAction: ""
+                property string pendingId: ""
+                property string pendingArg: ""
+                command: (pendingAction === "update") ?
+                    ["python3", Quickshell.shellPath("scripts/google_sync.py"), "update-task", pendingId, pendingArg] :
+                    ["python3", Quickshell.shellPath("scripts/google_sync.py"), "delete-task", pendingId]
+                stdout: SplitParser {
+                    onRead: (data) => {
+                        if (data.includes("[RESULT]")) {
+                            try {
+                                const jsonStr = data.substring(data.indexOf("[RESULT]") + 8).trim();
+                                const res = JSON.parse(jsonStr);
+                                todoItem.feedbackSynced = res.synced ?? false;
+                                if (actionProcess.pendingAction === "update") {
+                                    todoItem.feedbackMsg = res.synced ? "✓ Sincronizado" : "💾 Guardado local";
+                                } else {
+                                    todoItem.feedbackMsg = res.synced ? "✓ Eliminado" : "💾 Eliminado local";
+                                }
+                            } catch (e) {
+                                todoItem.feedbackMsg = "✓ Listo";
+                            }
+                        }
+                    }
+                }
+                onExited: (exitCode) => {
+                    todoItem.isUpdating = false;
+                    todoItem.isDeleting = false;
+                    actionFinishTimer.restart();
+                }
+            }
+
+            Timer {
+                id: actionFinishTimer
+                interval: 800
+                onTriggered: {
+                    if (actionProcess.pendingAction === "update") {
+                        if (!todoItem.modelData.done)
+                            Todo.markDone(todoItem.modelData.originalIndex);
+                        else
+                            Todo.markUnfinished(todoItem.modelData.originalIndex);
+                    } else if (actionProcess.pendingAction === "delete") {
+                        Todo.deleteItem(todoItem.modelData.originalIndex);
+                    }
+                    todoItem.feedbackMsg = "";
+                }
+            }
 
             implicitHeight: todoItemRectangle.implicitHeight
             width: ListView.view.width
@@ -71,36 +126,62 @@ Item {
                         Layout.leftMargin: 10
                         Layout.rightMargin: 10
                         Layout.bottomMargin: todoListItemPadding
+
+                        StyledText {
+                            visible: todoItem.feedbackMsg !== ""
+                            text: todoItem.feedbackMsg
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: todoItem.feedbackSynced ? Appearance.colors.colPrimary : Appearance.colors.colOutlineVariant
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
                         Item {
                             Layout.fillWidth: true
                         }
+
                         TodoItemActionButton {
                             Layout.fillWidth: false
+                            spinning: todoItem.isUpdating
+                            enabled: !todoItem.isUpdating && !todoItem.isDeleting
                             onClicked: {
-                                if (!todoItem.modelData.done)
-                                    Todo.markDone(todoItem.modelData.originalIndex);
-                                else
-                                    Todo.markUnfinished(todoItem.modelData.originalIndex);
+                                todoItem.isUpdating = true;
+                                actionProcess.pendingAction = "update";
+                                actionProcess.pendingId = todoItem.modelData.gtask_id ?? "";
+                                actionProcess.pendingArg = !todoItem.modelData.done ? "true" : "false";
+                                if (actionProcess.pendingId) {
+                                    actionProcess.running = true;
+                                } else {
+                                    actionFinishTimer.restart();
+                                }
                             }
                             contentItem: MaterialSymbol {
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
-                                text: todoItem.modelData.done ? "remove_done" : "check"
+                                text: todoItem.isUpdating ? "sync" : (todoItem.modelData.done ? "remove_done" : "check")
                                 iconSize: Appearance.font.pixelSize.larger
-                                color: Appearance.colors.colOnLayer1
+                                color: todoItem.isUpdating ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer1
                             }
                         }
                         TodoItemActionButton {
                             Layout.fillWidth: false
+                            spinning: todoItem.isDeleting
+                            enabled: !todoItem.isUpdating && !todoItem.isDeleting
                             onClicked: {
-                                Todo.deleteItem(todoItem.modelData.originalIndex);
+                                todoItem.isDeleting = true;
+                                actionProcess.pendingAction = "delete";
+                                actionProcess.pendingId = todoItem.modelData.gtask_id ?? "";
+                                if (actionProcess.pendingId) {
+                                    actionProcess.running = true;
+                                } else {
+                                    actionFinishTimer.restart();
+                                }
                             }
                             contentItem: MaterialSymbol {
                                 anchors.centerIn: parent
                                 horizontalAlignment: Text.AlignHCenter
-                                text: "delete_forever"
+                                text: todoItem.isDeleting ? "sync" : "delete_forever"
                                 iconSize: Appearance.font.pixelSize.larger
-                                color: Appearance.colors.colOnLayer1
+                                color: todoItem.isDeleting ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer1
                             }
                         }
                     }
