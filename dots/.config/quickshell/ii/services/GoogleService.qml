@@ -40,6 +40,10 @@ Singleton {
         }
     }
 
+    function refreshCalendar() {
+        calendarFileView.reload();
+    }
+
     function addEvent(eventObj) {
         const jsonStr = JSON.stringify(eventObj);
         Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-event", jsonStr]);
