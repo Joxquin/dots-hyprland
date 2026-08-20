@@ -217,24 +217,107 @@ Item {
                 bottom: parent.bottom
                 left: parent.left
             }
-            color: Appearance.colors.colLayer1
+            color: uptimeMouseArea.containsMouse ? Appearance.colors.colLayer2 : Appearance.colors.colLayer1
             radius: height / 2
             implicitWidth: uptimeRow.implicitWidth + 24
             implicitHeight: uptimeRow.implicitHeight + 8
-            
+
+            Behavior on color {
+                ColorAnimation { duration: 150 }
+            }
+
+            property bool isSyncing: false
+
+            function triggerSync() {
+                isSyncing = true;
+                syncRotateAnim.restart();
+                GoogleService.sync();
+                syncCooldownTimer.restart();
+            }
+
+            Timer {
+                id: syncCooldownTimer
+                interval: 2000
+                onTriggered: uptimeContainer.isSyncing = false
+            }
+
+            Connections {
+                target: GlobalStates
+                function onSidebarRightOpenChanged() {
+                    if (GlobalStates.sidebarRightOpen) {
+                        uptimeContainer.triggerSync();
+                    }
+                }
+            }
+
+            Component.onCompleted: {
+                if (GlobalStates.sidebarRightOpen) {
+                    uptimeContainer.triggerSync();
+                }
+            }
+
+            MouseArea {
+                id: uptimeMouseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: uptimeContainer.triggerSync()
+            }
+
             Row {
                 id: uptimeRow
                 anchors.centerIn: parent
                 spacing: 8
-                CustomIcon {
-                    id: distroIcon
+
+                Item {
+                    id: iconContainer
                     anchors.verticalCenter: parent.verticalCenter
                     width: 25
                     height: 25
-                    source: SystemInfo.distroIcon
-                    colorize: true
-                    color: Appearance.colors.colOnLayer0
+
+                    Item {
+                        id: syncIconWrapper
+                        anchors.fill: parent
+                        visible: opacity > 0
+                        opacity: (uptimeContainer.isSyncing || uptimeMouseArea.containsMouse) ? 1 : 0
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 200 }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            iconSize: 22
+                            text: "sync"
+                            color: Appearance.colors.colPrimary
+                        }
+
+                        RotationAnimation {
+                            id: syncRotateAnim
+                            target: syncIconWrapper
+                            from: 0
+                            to: 360
+                            duration: 1000
+                            loops: uptimeContainer.isSyncing ? Animation.Infinite : 1
+                            running: uptimeContainer.isSyncing
+                        }
+                    }
+
+                    CustomIcon {
+                        id: distroIcon
+                        anchors.fill: parent
+                        source: SystemInfo.distroIcon
+                        colorize: true
+                        color: Appearance.colors.colOnLayer0
+                        visible: opacity > 0
+                        opacity: (uptimeContainer.isSyncing || uptimeMouseArea.containsMouse) ? 0 : 1
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 200 }
+                        }
+                    }
                 }
+
                 StyledText {
                     anchors.verticalCenter: parent.verticalCenter
                     font.pixelSize: Appearance.font.pixelSize.normal
@@ -242,6 +325,10 @@ Item {
                     text: Translation.tr("Up %1").arg(DateTime.uptime)
                     textFormat: Text.MarkdownText
                 }
+            }
+
+            StyledToolTip {
+                text: Translation.tr("Sincronizar con Google (Tareas y Calendario)")
             }
         }
 
