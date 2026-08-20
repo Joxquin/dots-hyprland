@@ -47,9 +47,9 @@ Item {
 
     property int blurMargin: Appearance.spacing.space250
     property int avatarSize: 64
-    property string hostname: SystemInfo.hostname
-    property string username: (Config.options.profile?.displayName ?? "") === "" ? SystemInfo.username : Config.options.profile.displayName
-    property string userDisplay: "@" + username
+    property string hostname: SystemInfo?.hostname ?? ""
+    property string username: ((Config.options?.profile?.displayName ?? "") !== "") ? Config.options.profile.displayName : (SystemInfo?.username ?? "")
+    property string userDisplay: username !== "" ? ("@" + username) : ""
     property var currentQuip: weatherQuip()
 
     function weatherQuip() {
