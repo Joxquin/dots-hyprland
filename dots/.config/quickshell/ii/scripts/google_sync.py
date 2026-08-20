@@ -17,7 +17,8 @@ DEFAULT_CLIENT_SECRET = ""
 REDIRECT_URI = "http://localhost:8080"
 SCOPES = [
     "https://www.googleapis.com/auth/tasks",
-    "https://www.googleapis.com/auth/calendar.readonly"
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar"
 ]
 
 def load_auth():
@@ -262,10 +263,46 @@ def sync_calendar():
     print(f"[GoogleSync] Synced {len(events)} calendar events!")
 
 def add_event(summary, start_time, end_time, description="", color_id=None, all_day=False):
+    import time
     auth = load_auth()
     token = get_valid_access_token(auth)
-    if not token or not summary:
+    if not summary:
+        print(json.dumps({"success": False, "message": "Falta el título"}))
         return
+
+    # 1. Save locally first into calendar_events.json so it is immediately persistent and visible
+    local_event = {
+        "id": f"local_{int(time.time())}",
+        "summary": summary,
+        "description": description,
+        "start": start_time,
+        "end": end_time if end_time else start_time,
+        "location": "",
+        "colorId": str(color_id) if color_id else "",
+        "htmlLink": "",
+        "synced": False
+    }
+
+    existing_events = []
+    if os.path.exists(CALENDAR_FILE):
+        try:
+            with open(CALENDAR_FILE, "r") as f:
+                existing_events = json.load(f)
+        except Exception:
+            existing_events = []
+
+    existing_events.insert(0, local_event)
+    try:
+        os.makedirs(os.path.dirname(CALENDAR_FILE), exist_ok=True)
+        with open(CALENDAR_FILE, "w") as f:
+            json.dump(existing_events, f, indent=2)
+    except Exception as e:
+        print(f"[GoogleSync] Error saving local event: {e}")
+
+    # 2. Format times with timezone for Google API
+    from datetime import datetime
+    local_tz = datetime.now().astimezone().strftime("%z")
+    tz_offset = f"{local_tz[:3]}:{local_tz[3:]}" if len(local_tz) == 5 else "-05:00"
 
     body = {
         "summary": summary,
@@ -278,11 +315,23 @@ def add_event(summary, start_time, end_time, description="", color_id=None, all_
         body["start"] = {"date": start_time}
         body["end"] = {"date": end_time if end_time else start_time}
     else:
-        body["start"] = {"dateTime": start_time}
-        body["end"] = {"dateTime": end_time}
+        st = start_time if ("+" in start_time or "Z" in start_time) else f"{start_time}{tz_offset}"
+        et = end_time if ("+" in end_time or "Z" in end_time) else f"{end_time}{tz_offset}"
+        body["start"] = {"dateTime": st}
+        body["end"] = {"dateTime": et}
 
-    api_request("https://www.googleapis.com/calendar/v3/calendars/primary/events", token, method="POST", body=body)
-    sync_calendar()
+    result = {"success": True, "synced": False, "message": "Guardado localmente (se sincronizará luego)"}
+
+    if token:
+        resp = api_request("https://www.googleapis.com/calendar/v3/calendars/primary/events", token, method="POST", body=body)
+        if resp and "id" in resp:
+            sync_calendar()
+            result = {"success": True, "synced": True, "message": "Sincronizado con Google Calendar"}
+        else:
+            result = {"success": True, "synced": False, "message": "Guardado localmente"}
+
+    print(f"[RESULT]{json.dumps(result)}")
+    return result
 
 def sync_all():
     sync_tasks()

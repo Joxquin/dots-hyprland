@@ -6,6 +6,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 
 WindowDialog {
     id: root
@@ -26,6 +27,11 @@ WindowDialog {
     property bool isAllDay: false
     property string selectedColor: "#4285F4"
     property string selectedColorId: "1"
+
+    property bool isSaving: false
+    property string statusMessage: ""
+    property bool isStatusSuccess: true
+    property string pendingJson: ""
 
     backgroundHeight: 650
 
@@ -53,6 +59,47 @@ WindowDialog {
         { color: "#DB4437", id: "4", name: "Rojo" },
         { color: "#F4B400", id: "5", name: "Amarillo" }
     ]
+
+    Process {
+        id: saveProcess
+        command: ["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-event", root.pendingJson]
+        stdout: SplitParser {
+            onRead: (data) => {
+                if (data.includes("[RESULT]")) {
+                    try {
+                        const jsonStr = data.substring(data.indexOf("[RESULT]") + 8).trim();
+                        const res = JSON.parse(jsonStr);
+                        if (res.synced) {
+                            root.statusMessage = Translation.tr("✓ Guardado y sincronizado con Google Calendar");
+                            root.isStatusSuccess = true;
+                        } else {
+                            root.statusMessage = Translation.tr("💾 Guardado localmente (se sincronizará luego)");
+                            root.isStatusSuccess = false;
+                        }
+                    } catch (e) {
+                        root.statusMessage = Translation.tr("💾 Guardado localmente");
+                        root.isStatusSuccess = false;
+                    }
+                }
+            }
+        }
+        onExited: (exitCode) => {
+            root.isSaving = false;
+            GoogleService.refreshCalendar();
+            closeDelayTimer.restart();
+        }
+    }
+
+    Timer {
+        id: closeDelayTimer
+        interval: 1400
+        onTriggered: {
+            titleInput.text = "";
+            descriptionInput.text = "";
+            root.statusMessage = "";
+            root.dismiss();
+        }
+    }
 
     RowLayout {
         Layout.fillWidth: true
@@ -191,6 +238,7 @@ WindowDialog {
                 id: titleInput
                 Layout.fillWidth: true
                 placeholderText: Translation.tr("Título del evento")
+                enabled: !root.isSaving
             }
 
             // Switch Todo el día
@@ -203,6 +251,7 @@ WindowDialog {
                 }
                 ConfigSwitch {
                     checked: root.isAllDay
+                    enabled: !root.isSaving
                     onCheckedChanged: root.isAllDay = checked
                 }
             }
@@ -218,6 +267,7 @@ WindowDialog {
                     Layout.fillWidth: true
                     text: "09:00"
                     placeholderText: "09:00"
+                    enabled: !root.isSaving
                 }
 
                 StyledText {
@@ -230,6 +280,7 @@ WindowDialog {
                     Layout.fillWidth: true
                     text: "10:00"
                     placeholderText: "10:00"
+                    enabled: !root.isSaving
                 }
             }
 
@@ -274,6 +325,7 @@ WindowDialog {
                         buttonRadius: 12
                         colBackground: modelData.color
                         colBackgroundHover: modelData.color
+                        enabled: !root.isSaving
                         onClicked: {
                             root.selectedColor = modelData.color;
                             root.selectedColorId = modelData.id;
@@ -296,8 +348,47 @@ WindowDialog {
                 id: descriptionInput
                 Layout.fillWidth: true
                 placeholderText: Translation.tr("Agregar descripción")
+                enabled: !root.isSaving
             }
         }
+    }
+
+    // Status Feedback Banner
+    Rectangle {
+        Layout.fillWidth: true
+        implicitHeight: 34
+        radius: Appearance.rounding.small
+        visible: root.statusMessage !== ""
+        color: root.isStatusSuccess ? Appearance.colors.colSecondaryContainer : Appearance.colors.colLayer2
+        border.width: 1
+        border.color: root.isStatusSuccess ? Appearance.colors.colPrimary : Appearance.colors.colOutlineVariant
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 6
+            spacing: 8
+
+            MaterialSymbol {
+                text: root.isStatusSuccess ? "check_circle" : "cloud_sync"
+                iconSize: 18
+                color: root.isStatusSuccess ? Appearance.colors.colPrimary : Appearance.colors.colOutlineVariant
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                text: root.statusMessage
+                font.pixelSize: Appearance.font.pixelSize.smaller
+                color: Appearance.colors.colOnLayer0
+                elide: Text.ElideRight
+            }
+        }
+    }
+
+    StyledIndeterminateProgressBar {
+        visible: root.isSaving
+        Layout.fillWidth: true
+        Layout.topMargin: -4
+        Layout.bottomMargin: -4
     }
 
     WindowDialogSeparator {}
@@ -305,6 +396,7 @@ WindowDialog {
     WindowDialogButtonRow {
         DialogButton {
             buttonText: Translation.tr("Cancelar")
+            enabled: !root.isSaving
             onClicked: root.dismiss()
         }
 
@@ -313,8 +405,8 @@ WindowDialog {
         }
 
         DialogButton {
-            buttonText: Translation.tr("Guardar en Google")
-            enabled: titleInput.text.trim().length > 0
+            buttonText: root.isSaving ? Translation.tr("Guardando...") : Translation.tr("Guardar en Google")
+            enabled: !root.isSaving && titleInput.text.trim().length > 0
             onClicked: {
                 const summary = titleInput.text.trim();
                 const desc = descriptionInput.text.trim();
@@ -329,7 +421,9 @@ WindowDialog {
                     end = `${root.dateString}T${et}:00`;
                 }
 
-                GoogleService.addEvent({
+                root.isSaving = true;
+                root.statusMessage = "";
+                root.pendingJson = JSON.stringify({
                     summary: summary,
                     description: desc,
                     start: start,
@@ -337,10 +431,7 @@ WindowDialog {
                     colorId: root.selectedColorId,
                     allDay: root.isAllDay
                 });
-
-                titleInput.text = "";
-                descriptionInput.text = "";
-                root.dismiss();
+                saveProcess.running = true;
             }
         }
     }
