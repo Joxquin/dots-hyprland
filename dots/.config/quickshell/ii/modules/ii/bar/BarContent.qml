@@ -64,7 +64,7 @@ Item { // Bar content region
         onMovedAway: GlobalStates.osdBrightnessOpen = false
         onPressed: event => {
             if (event.button === Qt.LeftButton)
-                GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen;
+                GlobalStates.toggleSidebarLeft();
         }
 
         // Visual content
@@ -216,7 +216,7 @@ Item { // Bar content region
         onMovedAway: GlobalStates.osdVolumeOpen = false;
         onPressed: event => {
             if (event.button === Qt.LeftButton) {
-                GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
+                GlobalStates.toggleSidebarRight();
             }
         }
 
@@ -261,7 +261,7 @@ Item { // Bar content region
                 }
 
                 onPressed: {
-                    GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
+                    GlobalStates.toggleSidebarRight();
                 }
 
                 RowLayout {

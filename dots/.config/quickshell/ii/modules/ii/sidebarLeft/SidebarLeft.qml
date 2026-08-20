@@ -204,7 +204,7 @@ Scope { // Scope
         target: "sidebarLeft"
 
         function toggle(): void {
-            GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen
+            GlobalStates.toggleSidebarLeft();
         }
 
         function close(): void {
@@ -221,7 +221,7 @@ Scope { // Scope
         description: "Toggles left sidebar on press"
 
         onPressed: {
-            GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen;
+            GlobalStates.toggleSidebarLeft();
         }
     }
 

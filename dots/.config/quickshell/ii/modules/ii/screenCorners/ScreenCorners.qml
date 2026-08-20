@@ -13,10 +13,10 @@ Scope {
     id: screenCorners
     readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
     property var actionForCorner: ({
-        [RoundCorner.CornerEnum.TopLeft]: () => GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen,
-        [RoundCorner.CornerEnum.BottomLeft]: () => GlobalStates.sidebarLeftOpen = !GlobalStates.sidebarLeftOpen,
-        [RoundCorner.CornerEnum.TopRight]: () => GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen,
-        [RoundCorner.CornerEnum.BottomRight]: () => GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen
+        [RoundCorner.CornerEnum.TopLeft]: () => GlobalStates.toggleSidebarLeft(),
+        [RoundCorner.CornerEnum.BottomLeft]: () => GlobalStates.toggleSidebarLeft(),
+        [RoundCorner.CornerEnum.TopRight]: () => GlobalStates.toggleSidebarRight(),
+        [RoundCorner.CornerEnum.BottomRight]: () => GlobalStates.toggleSidebarRight()
     })
 
     component CornerPanelWindow: PanelWindow {
