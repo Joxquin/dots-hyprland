@@ -1,0 +1,3239 @@
+import QtQuick
+import QtQuick.Layouts
+import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
+import qs.services
+import qs.modules.common
+import qs.modules.common.functions
+import qs.modules.common.widgets
+import qs.modules.settings.display
+
+ContentPage {
+    id: displayConfigPage
+    forceWidth: true
+
+    // Emitted after the apply chain (writeProc → reloadProc) has finished —
+    // the parent settings.qml listens for this and recenters its window so
+    // the user doesn't have to drag it back to true centre after every
+    // scale change. Wayland's QScreen change signals aren't reliable here.
+    signal scaleApplied()
+
+    property var monitors: []
+    property var pendingChanges: ({})
+
+    // Revert-after-apply state. Wayland gives no recovery if the user
+    // applies a mode the panel can't drive (black screen, no TTY hint
+    // back to the settings window). Each Apply takes the file's pre-
+    // apply content as `revertSnapshot`, shows a banner with 15s
+    // countdown after the reload completes, and writes the snapshot
+    // back if the user doesn't click Keep. Closing settings or
+    // navigating to another page is treated as "didn't see / can't
+    // see" — Component.onDestruction triggers the revert too.
+    property string lastReadMonitorsConf: ""
+    property string revertSnapshot: ""
+    property bool revertPending: false
+    property int revertSecondsRemaining: 0
+    // Set true in applyAllChanges, consumed by reloadProc.onExited
+    // to know whether the reload it just observed was an Apply (banner)
+    // or a side-effect (no banner — e.g., the revertChanges() write,
+    // setDefaultMonitor's general.lua cursor-table rewrite).
+    property bool _showBannerAfterNextReload: false
+
+    // Palette of colours for distinguishing monitors on the canvas
+    readonly property var monitorColors: [
+        Appearance.colors.colPrimary,
+        Appearance.m3colors.m3tertiary,
+        Appearance.m3colors.m3secondary,
+        Appearance.m3colors.m3error,
+    ]
+
+    // Targets the Lua-config tree introduced in Hyprland 0.55.
+    // monitors.lua holds per-monitor hl.monitor({...}) calls;
+    // hyprlandGeneralPath holds the cursor block (default_monitor).
+    property string monitorsConfPath: `${Quickshell.env("HOME")}/.config/hypr/monitors.lua`
+    property string hyprlandConfPath: `${Quickshell.env("HOME")}/.config/hypr/hyprland.lua`
+    property string hyprlandGeneralPath: `${Quickshell.env("HOME")}/.config/hypr/hyprland/general.lua`
+    property string defaultMonitor: ""
+    property var confBitdepth: ({})
+    property var confScale: ({})
+    property var confVrr: ({})
+    property var confMirror: ({})
+    property var confPositionMode: ({})
+    property var confColorMode: ({})
+    property var confMaxLuminance:    ({})
+    property var confMaxAvgLuminance: ({})
+    property var confMinLuminance:    ({})
+    property var confSdrMaxLuminance: ({})
+    property var confSdrMinLuminance: ({})
+    property var confSdrBrightness:   ({})
+    property var confSdrSaturation:   ({})
+    property var confHdrMode:          ({})
+    // Set to true for a monitor name once the calibration wizard has been completed
+    // (either this session via the wizard, or previously — detected from confMaxLuminance)
+    property var hdrCalibratedMonitors: ({})
+
+    // ICC profile state. iccProfileDir is the on-disk library; the import
+    // flow copies user-picked .icc/.icm files into this dir so paths in
+    // monitors.lua stay stable. iccProfiles is rescanned whenever a file
+    // is added or removed.
+    property var confIccProfile: ({})
+    property string iccProfileDir: `${Quickshell.env("HOME")}/.icc-profiles`
+    property var iccProfiles: []
+
+    // Workspace-to-monitor bindings
+    // "default" = Hyprland decides, "custom" = user assigns workspaces to monitors
+    property string wsBindingMode: "default"
+    // Map of workspace number (1–10) → monitor name. Empty string = unassigned.
+    property var workspaceAssignments: ({})
+    // Per-monitor count of 10-workspace rows shown (default 1 = workspaces 1–10)
+    property var wsRowCounts: ({})
+
+    // Centralized HDR default values — used by initPending, buildMonitorBlock,
+    // hdrCalLoader, and fine-tune sliders so they stay in sync.
+    readonly property var hdrDefaults: ({
+        maxLuminance: 600, maxAvgLuminance: 400, minLuminance: 0,
+        sdrMaxLuminance: 250, sdrMinLuminance: 0.005,
+        sdrBrightness: 1.0, sdrSaturation: 1.0,
+    })
+
+    // Helper: update a single key in pendingChanges for a monitor and trigger bindings.
+    function updatePending(monName, key, value) {
+        let p = Object.assign({}, pendingChanges[monName] ?? {});
+        p[key] = value;
+        pendingChanges[monName] = p;
+        pendingChanges = Object.assign({}, pendingChanges);
+    }
+
+    // Helper: merge multiple keys into pendingChanges for a monitor.
+    function updatePendingBatch(monName, obj) {
+        let p = Object.assign({}, pendingChanges[monName] ?? {}, obj);
+        pendingChanges[monName] = p;
+        pendingChanges = Object.assign({}, pendingChanges);
+    }
+
+    function assignWorkspace(wsNum, monName) {
+        let a = Object.assign({}, workspaceAssignments);
+        // If already assigned to this monitor, unassign
+        if (a[wsNum] === monName) {
+            delete a[wsNum];
+        } else {
+            a[wsNum] = monName;
+        }
+        workspaceAssignments = a;
+    }
+
+    function setDefaultMonitor(monitorName) {
+        displayConfigPage.defaultMonitor = monitorName;
+        // Force the new default to position 0x0
+        let p = Object.assign({}, pendingChanges[monitorName] ?? {});
+        p.x = 0;
+        p.y = 0;
+        delete p.positionMode;
+        pendingChanges[monitorName] = p;
+        pendingChanges = Object.assign({}, pendingChanges);
+
+        // Re-sort monitors so default is first
+        let sorted = displayConfigPage.monitors.slice().sort((a, b) => {
+            if (a.name === monitorName) return -1;
+            if (b.name === monitorName) return 1;
+            return 0;
+        });
+        displayConfigPage.monitors = sorted;
+
+        // Persist cursor.default_monitor into hyprland/general.lua's
+        // `cursor = { ... }` table. We update the existing key if present,
+        // otherwise insert it right after `cursor = {`. The rest of the
+        // cursor table (zoom_factor, hotspot_padding, etc.) stays intact.
+        let escaped = monitorName.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        let confPath = displayConfigPage.hyprlandGeneralPath.replace(/'/g, "\\'");
+        let py =
+            "import re\n" +
+            "path = '" + confPath + "'\n" +
+            "name = '" + escaped + "'\n" +
+            "try:\n" +
+            "    content = open(path, 'r').read()\n" +
+            "except FileNotFoundError:\n" +
+            "    content = ''\n" +
+            "# Rewrite existing default_monitor key inside the cursor table.\n" +
+            "new_text, count = re.subn(\n" +
+            "    r'(cursor\\s*=\\s*\\{[^}]*?default_monitor\\s*=\\s*\")[^\"]*(\")',\n" +
+            "    r'\\g<1>' + name + r'\\g<2>',\n" +
+            "    content, count=1, flags=re.S)\n" +
+            "if count == 0:\n" +
+            "    # No existing key — insert right after `cursor = {`.\n" +
+            "    new_text = re.sub(\n" +
+            "        r'(cursor\\s*=\\s*\\{)',\n" +
+            "        r'\\1\\n        default_monitor = \"' + name + r'\",',\n" +
+            "        content, count=1)\n" +
+            "open(path, 'w').write(new_text)\n";
+        writeHyprlandProc.command = ["python3", "-c", py];
+        writeHyprlandProc.running = false;
+        writeHyprlandProc.running = true;
+    }
+
+
+    function clearAllAssignments() {
+        workspaceAssignments = ({});
+    }
+
+    function workspacesForMonitor(monName) {
+        let result = [];
+        for (let ws = 1; ws <= 10; ws++) {
+            if (workspaceAssignments[ws] === monName) result.push(ws);
+        }
+        return result;
+    }
+    // Keyed by monitor name (e.g. "DP-1").
+    // Each entry: { vrr: bool, tenBit: bool }
+    // Only populated after capabilitiesProc finishes; defaults to false while pending.
+    property var monitorCapabilities: ({})
+
+    function parseMonitorsConf() {
+        readConfProc.running = false;
+        readConfProc.running = true;
+    }
+
+    // Capability detection for VRR and 10-bit per connector.
+    //
+    // - amdgpu, i915, xe: safe, features allowed
+    // - nvidia >= 581: modern nvidia-open, safe
+    // - nvidia < 581: legacy (580xx/470xx/390xx), features blocked
+    // - nouveau, radeon, unknown: features blocked
+    // Per-connector sysfs files (vrr_capable, pixel_formats) are used where
+    // available; missing files fall back to the driver-level flag.
+    Process {
+        id: capabilitiesProc
+        command: ["python3", "-c", `
+import os, json, glob
+
+def card_driver(card):
+    try:
+        return os.path.basename(os.readlink(os.path.join(card, 'device', 'driver')))
+    except Exception:
+        return ''
+
+def nvidia_is_legacy():
+    # nvidia-580xx-dkms is frozen at 580.x and will never exceed it.
+    # nvidia-open will only increase from here. >= 581 means modern safe driver.
+    try:
+        v = open('/sys/module/nvidia/version').read().strip()
+        return int(v.split('.')[0]) < 581
+    except Exception:
+        return True   # cannot confirm — treat as legacy to be safe
+
+result = {}
+for card in sorted(glob.glob('/sys/class/drm/card[0-9]')):
+    driver  = card_driver(card)
+    card_id = os.path.basename(card)
+
+    if driver == 'amdgpu':
+        drv_vrr   = True
+        drv_10bit = True
+    elif driver in ('i915', 'xe'):
+        drv_vrr   = True
+        drv_10bit = True
+    elif driver == 'nvidia':
+        legacy    = nvidia_is_legacy()
+        drv_vrr   = not legacy
+        drv_10bit = not legacy
+    else:
+        # nouveau, radeon, unknown — conservatively disabled
+        drv_vrr   = False
+        drv_10bit = False
+
+    for conn_dir in sorted(glob.glob(f'/sys/class/drm/{card_id}-*/')):
+        conn_full = os.path.basename(conn_dir.rstrip('/'))
+        name = '-'.join(conn_full.split('-')[1:])
+        if 'Writeback' in name:
+            continue
+
+        # VRR: read vrr_capable from EDID sysfs, fall back to driver flag
+        vrr = False
+        if drv_vrr:
+            try:
+                vrr = open(os.path.join(conn_dir, 'vrr_capable')).read().strip() == '1'
+            except FileNotFoundError:
+                vrr = drv_vrr
+            except Exception:
+                vrr = False
+
+        # 10-bit: read pixel_formats from sysfs, fall back to driver flag
+        ten_bit = False
+        if drv_10bit:
+            try:
+                fmts    = open(os.path.join(conn_dir, 'pixel_formats')).read().split()
+                ten_bit = any(f in {'XR30','XB30','AR30','AB30'} or f.endswith('30')
+                              for f in fmts)
+            except FileNotFoundError:
+                ten_bit = drv_10bit
+            except Exception:
+                ten_bit = False
+
+        # HDR + Colorimetry: walk the EDID's CTA-861 extension blocks
+        # once, picking out two extended-tag blocks we care about:
+        #
+        #   ext-tag 6: HDR Static Metadata Data Block (CTA-861-G § 7.5.13)
+        #     desired_max_luminance     = 50 * 2 ** (byte / 32)   cd/m²
+        #     desired_max_frame_avg     = 50 * 2 ** (byte / 32)   cd/m²
+        #     desired_min_luminance     = (max * (byte/255)**2) / 100
+        #     Layout: pos+1 ext_tag=6, pos+2 eotf, pos+3 SM, pos+4..6 lum
+        #
+        #   ext-tag 5: Colorimetry Data Block (CTA-861-G § 7.5.5)
+        #     pos+2 bits encode panel-supported colorspaces:
+        #       bit 0: xvYCC601    bit 4: opRGB (Adobe RGB)
+        #       bit 1: xvYCC709    bit 5: BT2020 cYCC
+        #       bit 2: sYCC601     bit 6: BT2020 YCC
+        #       bit 3: opYCC601    bit 7: BT2020 RGB
+        #     The flags drive the EDID-derived color-mode pill: panels
+        #     that don't advertise a wide gamut shouldn't be silently
+        #     mapped to one. DCI-P3 isn't in CTA-861's standard slots
+        #     (it lives in DisplayID extensions or vendor blocks); we
+        #     leave it false here and let the UI fall back to bit-depth-
+        #     based defaults for that one.
+        hdr = False
+        hdr_max = None
+        hdr_avg = None
+        hdr_min = None
+        color_bt2020 = False
+        color_adobe  = False
+        color_dci_p3 = False
+        try:
+            edid = open(os.path.join(conn_dir, 'edid'), 'rb').read()
+            for blk in range(1, len(edid) // 128):
+                b = edid[blk*128:(blk+1)*128]
+                if len(b) < 128 or b[0] != 0x02:
+                    continue
+                dtd_off = b[2]
+                pos = 4
+                while pos < dtd_off and pos < 128:
+                    t = (b[pos] >> 5) & 0x07
+                    ln = b[pos] & 0x1F
+                    if pos + 1 + ln > 128:
+                        break
+                    if t == 7 and ln >= 2 and b[pos+1] == 6:
+                        hdr = True
+                        if ln >= 4:
+                            hdr_max = round(50 * (2 ** (b[pos+4] / 32.0)))
+                        if ln >= 5:
+                            hdr_avg = round(50 * (2 ** (b[pos+5] / 32.0)))
+                        if ln >= 6 and hdr_max is not None:
+                            hdr_min = round(hdr_max * ((b[pos+6] / 255.0) ** 2) / 100, 4)
+                    elif t == 7 and ln >= 2 and b[pos+1] == 5:
+                        f = b[pos+2]
+                        color_bt2020 = bool(f & 0xE0)   # bits 5/6/7
+                        color_adobe  = bool(f & 0x18)   # bits 3/4
+                    pos += 1 + ln
+        except Exception:
+            pass
+
+        result[name] = {
+            'vrr': vrr,
+            'tenBit': ten_bit,
+            'hdr': hdr,
+            'hdrMaxLuminance':    hdr_max,
+            'hdrMaxAvgLuminance': hdr_avg,
+            'hdrMinLuminance':    hdr_min,
+            'colorBT2020': color_bt2020,
+            'colorAdobe':  color_adobe,
+            'colorDciP3':  color_dci_p3,
+        }
+
+print(json.dumps(result))
+`]
+        property string output: ""
+        stdout: SplitParser {
+            onRead: data => capabilitiesProc.output += data
+        }
+        onExited: {
+            try {
+                let parsed = JSON.parse(capabilitiesProc.output.trim());
+                displayConfigPage.monitorCapabilities = parsed;
+            } catch(e) {
+                console.warn("Failed to parse monitor capabilities:", e);
+            }
+            capabilitiesProc.output = "";
+        }
+    }
+
+    Process {
+        id: readConfProc
+        command: ["cat", displayConfigPage.monitorsConfPath]
+        property string output: ""
+        stdout: SplitParser {
+            onRead: data => readConfProc.output += data + "\n"
+        }
+        onExited: {
+            // Cache the raw file content so applyAllChanges can
+            // snapshot it for the revert-after-apply banner. Stored
+            // before any parsing so a revert restores the file byte-
+            // for-byte (preserving comments, ordering, etc.).
+            displayConfigPage.lastReadMonitorsConf = readConfProc.output;
+            let bitdepthResult = {};
+            let scaleResult = {};
+            let vrrResult = {};
+            let mirrorResult = {};
+            let positionModeResult = {};
+            let colorModeResult = {};
+            let maxLuminanceResult    = {};
+            let maxAvgLuminanceResult = {};
+            let minLuminanceResult    = {};
+            let sdrMaxLuminanceResult = {};
+            let sdrMinLuminanceResult = {};
+            let sdrBrightnessResult   = {};
+            let sdrSaturationResult   = {};
+            let hdrModeResult = {};
+            let iccProfileResult = {};
+            let wsAssignments = {};
+            let hasAnyWsBinding = false;
+
+            // Lua format: each monitor is `hl.monitor({ output = "DP-1", ... })`
+            // and workspace bindings are `hl.workspace_rule({ workspace = "1", monitor = "DP-1" })`.
+            // HDR-mode metadata is persisted as a Lua comment `-- ii_hdr_mode:NAME = N`.
+            //
+            // Strip surrounding quotes/trailing-comma from a captured Lua value.
+            const stripLua = v => String(v).replace(/^\s*"/, "").replace(/"?,?\s*$/, "").trim();
+            let currentBlock = null;
+            readConfProc.output.split("\n").forEach(line => {
+                let trimmed = line.trim();
+
+                // ── hl.monitor({ block start ──────────────────────────────
+                if (/^hl\.monitor\s*\(\s*\{/.test(trimmed)) {
+                    currentBlock = {};
+                    return;
+                }
+                if (currentBlock !== null) {
+                    if (/^\}\s*\)/.test(trimmed) || trimmed === "}") {
+                        // End of block — commit parsed values
+                        let name = currentBlock["output"];
+                        if (name) {
+                            if (currentBlock["bitdepth"])  bitdepthResult[name]    = parseInt(currentBlock["bitdepth"]);
+                            if (currentBlock["scale"])     scaleResult[name]       = parseFloat(currentBlock["scale"]);
+                            if (currentBlock["vrr"])       vrrResult[name]         = parseInt(currentBlock["vrr"]);
+                            if (currentBlock["mirror"])    mirrorResult[name]      = currentBlock["mirror"];
+                            if (currentBlock["cm"])        colorModeResult[name]   = currentBlock["cm"];
+                            if (currentBlock["max_luminance"])     maxLuminanceResult[name]    = parseFloat(currentBlock["max_luminance"]);
+                            if (currentBlock["max_avg_luminance"]) maxAvgLuminanceResult[name] = parseFloat(currentBlock["max_avg_luminance"]);
+                            if (currentBlock["min_luminance"])     minLuminanceResult[name]    = parseFloat(currentBlock["min_luminance"]);
+                            if (currentBlock["sdr_max_luminance"]) sdrMaxLuminanceResult[name] = parseFloat(currentBlock["sdr_max_luminance"]);
+                            if (currentBlock["sdr_min_luminance"]) sdrMinLuminanceResult[name] = parseFloat(currentBlock["sdr_min_luminance"]);
+                            if (currentBlock["sdrbrightness"])     sdrBrightnessResult[name]   = parseFloat(currentBlock["sdrbrightness"]);
+                            if (currentBlock["sdrsaturation"])     sdrSaturationResult[name]   = parseFloat(currentBlock["sdrsaturation"]);
+                            if (currentBlock["icc"])               iccProfileResult[name]      = currentBlock["icc"];
+                            let pos = currentBlock["position"] ?? "";
+                            if (pos.startsWith("auto-center-")) positionModeResult[name] = pos;
+                        }
+                        currentBlock = null;
+                    } else {
+                        let kv = trimmed.match(/^(\w+)\s*=\s*(.+?),?\s*$/);
+                        if (kv) currentBlock[kv[1]] = stripLua(kv[2]);
+                    }
+                    return;
+                }
+
+                // ── HDR mode metadata (persisted as a Lua comment) ────────
+                let mh = trimmed.match(/^--\s*ii_hdr_mode:(\S+)\s*=\s*(\d+)/);
+                if (mh) hdrModeResult[mh[1]] = parseInt(mh[2]);
+
+                // ── Workspace bindings — hl.workspace_rule({ workspace = "N", monitor = "DP-1" })
+                let mw = line.match(/hl\.workspace_rule\(\{\s*workspace\s*=\s*"(\d+)"\s*,\s*monitor\s*=\s*"([^"]+)"/);
+                if (mw) {
+                    wsAssignments[parseInt(mw[1])] = mw[2];
+                    hasAnyWsBinding = true;
+                }
+            });
+
+            displayConfigPage.confBitdepth      = bitdepthResult;
+            displayConfigPage.confScale         = scaleResult;
+            displayConfigPage.confVrr            = vrrResult;
+            displayConfigPage.confMirror         = mirrorResult;
+            displayConfigPage.confPositionMode   = positionModeResult;
+            displayConfigPage.confColorMode      = colorModeResult;
+            displayConfigPage.confMaxLuminance    = maxLuminanceResult;
+            displayConfigPage.confMaxAvgLuminance = maxAvgLuminanceResult;
+            displayConfigPage.confMinLuminance    = minLuminanceResult;
+            displayConfigPage.confSdrMaxLuminance = sdrMaxLuminanceResult;
+            displayConfigPage.confSdrMinLuminance = sdrMinLuminanceResult;
+            displayConfigPage.confSdrBrightness   = sdrBrightnessResult;
+            displayConfigPage.confSdrSaturation   = sdrSaturationResult;
+            displayConfigPage.confHdrMode          = hdrModeResult;
+            displayConfigPage.confIccProfile       = iccProfileResult;
+            // Any monitor that already has max_luminance in conf has been calibrated before
+            let calibrated = Object.assign({}, displayConfigPage.hdrCalibratedMonitors);
+            Object.keys(maxLuminanceResult).forEach(n => { calibrated[n] = true; });
+            displayConfigPage.hdrCalibratedMonitors = calibrated;
+            displayConfigPage.workspaceAssignments = wsAssignments;
+            // Show the extra 10-workspace rows for any binding beyond 10 so
+            // reopened pages don't hide (and Apply doesn't drop) them.
+            let rc = Object.assign({}, displayConfigPage.wsRowCounts);
+            for (const ws in wsAssignments) {
+                const mon = wsAssignments[ws];
+                rc[mon] = Math.max(rc[mon] ?? 1, Math.ceil(parseInt(ws) / 10));
+            }
+            displayConfigPage.wsRowCounts = rc;
+            displayConfigPage.wsBindingMode = hasAnyWsBinding ? "custom" : "default";
+            readConfProc.output = "";
+            // Only refresh monitors after conf is parsed so initPending gets correct values
+            displayConfigPage.refreshMonitors();
+        }
+    }
+
+    function refreshMonitors() {
+        monitorProc.running = false;
+        monitorProc.running = true;
+    }
+
+    // Snap scale to the nearest 1/120 to avoid floating point drift —
+    // Wayland's fractional-scale protocol expresses every scale in 120ths,
+    // so this is the finest grid a scale can actually take effect at.
+    function snapScale(scale) {
+        return Math.round(scale * 120) / 120;
+    }
+
+    function buildMonitorBlock(name, m, mon) {
+        let snapped = snapScale(m.scale);
+        let scale = (Math.round(snapped * 1e6) / 1e6).toString();
+        let isDefault = name === displayConfigPage.defaultMonitor;
+        let pos = isDefault ? "0x0" : (m.positionMode ?? `${m.x}x${m.y}`);
+        let mode = `${m.width}x${m.height}@${m.refreshRate.toFixed(6)}`;
+        let colorMode = m.colorMode ?? "srgb";
+        let isHdr = colorMode === "hdr" || colorMode === "hdredid";
+        let hdrMode = m.hdrMode ?? 0;  // 0=none, 1=Fullscreen Only, 2=Always On
+        // HDR forces 10-bit; otherwise use the stored bitdepth
+        let bitdepth = (isHdr || hdrMode > 0) ? 10 : (m.bitdepth ?? 8);
+
+        let lines = [];
+        // Persist HDR mode as a Lua comment so it survives reloads.
+        if (isHdr && hdrMode > 0)
+            lines.push(`-- ii_hdr_mode:${name} = ${hdrMode}`);
+        // Lua hl.monitor({...}) call. Strings get quoted, numbers and booleans bare.
+        lines.push(`hl.monitor({`);
+        lines.push(`    output = "${name}",`);
+        if (!m.enabled) {
+            lines.push(`    disabled = true,`);
+        } else {
+            lines.push(`    mode = "${mode}",`);
+            lines.push(`    position = "${pos}",`);
+            lines.push(`    scale = "${scale}",`);
+            lines.push(`    transform = ${m.transform},`);
+            if (bitdepth !== 8)          lines.push(`    bitdepth = ${bitdepth},`);
+            if ((m.vrr ?? 0) !== 0)      lines.push(`    vrr = ${m.vrr},`);
+            if (m.mirror)                lines.push(`    mirror = "${m.mirror}",`);
+            // "Fullscreen Only" (1, default): don't write cm=hdr — Hyprland's
+            // render:cm_auto_hdr (default 1) handles fullscreen HDR switching.
+            // "Always On" (2): write cm=hdr/hdredid as usual.
+            if (isHdr && hdrMode === 1) {
+                // Skip cm = hdr so Hyprland only activates HDR for fullscreen apps
+            } else if (colorMode !== "auto") {
+                lines.push(`    cm = "${colorMode}",`);
+            }
+            // ICC profile (mutually exclusive with HDR — Hyprland's ICC
+            // pipeline replaces colorspace conversion).
+            let icc = m.iccProfile ?? "";
+            if (icc && !isHdr) lines.push(`    icc = "${icc}",`);
+            if (isHdr) {
+                let d = displayConfigPage.hdrDefaults;
+                lines.push(`    sdrbrightness = ${(m.sdrBrightness   ?? d.sdrBrightness).toFixed(3)},`);
+                lines.push(`    sdrsaturation = ${(m.sdrSaturation   ?? d.sdrSaturation).toFixed(3)},`);
+                lines.push(`    sdr_min_luminance = ${(m.sdrMinLuminance ?? d.sdrMinLuminance).toFixed(4)},`);
+                lines.push(`    sdr_max_luminance = ${Math.round(m.sdrMaxLuminance ?? d.sdrMaxLuminance)},`);
+                if (colorMode === "hdr") {
+                    lines.push(`    min_luminance = ${(m.minLuminance    ?? d.minLuminance).toFixed(4)},`);
+                    lines.push(`    max_luminance = ${Math.round(m.maxLuminance    ?? d.maxLuminance)},`);
+                    lines.push(`    max_avg_luminance = ${Math.round(m.maxAvgLuminance ?? d.maxAvgLuminance)},`);
+                }
+                lines.push(`    sdr_eotf = "srgb",`);
+            }
+        }
+        lines.push(`})`);
+        return lines.join("\n");
+    }
+
+    // Writes the entire monitors.lua from current pendingChanges for
+    // every monitor at once. The page now exposes a single Apply
+    // button (rather than one per monitor) — this matches the
+    // function's actual behavior (it's always written every monitor
+    // every time anyway) and avoids the multi-screen flash users got
+    // when clicking Apply on each monitor in turn.
+    function applyAllChanges() {
+        if (monitors.length === 0) return;
+        // Snapshot the file's pre-apply content so the revert banner can
+        // restore it. lastReadMonitorsConf is updated whenever
+        // readConfProc finishes (page load + every successful apply
+        // chain), so it always reflects the most recent on-disk state.
+        revertSnapshot = lastReadMonitorsConf;
+        _showBannerAfterNextReload = true;
+        // Build full monitors.lua content from all pending changes
+        let blocks = [];
+        monitors.forEach(mon => {
+            let p = pendingChanges[mon.name] ?? {};
+            blocks.push(buildMonitorBlock(mon.name, p, mon));
+        });
+        // Append workspace-monitor bindings if in custom mode (Lua syntax).
+        if (wsBindingMode === "custom") {
+            let wsLines = [];
+            const bound = Object.keys(workspaceAssignments).map(Number).filter(n => n >= 1).sort((a, b) => a - b);
+            for (const ws of bound) {
+                wsLines.push(`hl.workspace_rule({ workspace = "${ws}", monitor = "${workspaceAssignments[ws]}" })`);
+            }
+            if (wsLines.length > 0) blocks.push(wsLines.join("\n"));
+        }
+        let fileContent = blocks.join("\n\n") + "\n";
+        // Embed content directly in the Python script to avoid argv newline issues
+        let escaped = fileContent
+            .replace(/\\/g, "\\\\")
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, "\\n");
+        let py =
+            "path = '" + displayConfigPage.monitorsConfPath + "'\n" +
+            "content = '" + escaped + "'\n" +
+            "open(path, 'w').write(content)\n";
+        writeProc.command = ["python3", "-c", py];
+        writeProc.running = false;
+        writeProc.running = true;
+    }
+
+    // User clicked "Keep" on the revert banner — accept the new config.
+    // The next applyAllChanges() call will snapshot the now-current
+    // file contents (lastReadMonitorsConf was already refreshed by the
+    // Apply chain's parseMonitorsConf), so subsequent reverts go to
+    // *this* state, not the older one.
+    function keepChanges() {
+        revertCountdownTimer.stop();
+        revertPending = false;
+        revertSecondsRemaining = 0;
+    }
+
+    // User clicked "Revert", the 15s timer expired, or the page is
+    // about to be destroyed. Writes the snapshot back through the
+    // existing writeProc → reloadProc chain. _showBannerAfterNextReload
+    // is already false at this point (cleared when the original Apply's
+    // banner came up), so this reload won't trigger a fresh banner.
+    function revertChanges() {
+        revertCountdownTimer.stop();
+        revertPending = false;
+        revertSecondsRemaining = 0;
+        if (revertSnapshot.length === 0) return;
+        let escaped = revertSnapshot
+            .replace(/\\/g, "\\\\")
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, "\\n");
+        let py =
+            "path = '" + displayConfigPage.monitorsConfPath + "'\n" +
+            "content = '" + escaped + "'\n" +
+            "open(path, 'w').write(content)\n";
+        writeProc.command = ["python3", "-c", py];
+        writeProc.running = false;
+        writeProc.running = true;
+    }
+
+    // Fires the revert via Quickshell.execDetached so it survives the
+    // page being destroyed (e.g. user navigates to another settings tab
+    // or closes the settings window without clicking Keep). Mirrors
+    // revertChanges() but doesn't need any QML state afterward — the
+    // page is going away.
+    function revertChangesDetached() {
+        if (revertSnapshot.length === 0) return;
+        let escaped = revertSnapshot
+            .replace(/\\/g, "\\\\")
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, "\\n");
+        let py =
+            "import subprocess\n" +
+            "path = '" + displayConfigPage.monitorsConfPath + "'\n" +
+            "content = '" + escaped + "'\n" +
+            "open(path, 'w').write(content)\n" +
+            "subprocess.run(['hyprctl', 'reload'])\n";
+        Quickshell.execDetached(["python3", "-c", py]);
+    }
+
+    Timer {
+        id: revertCountdownTimer
+        interval: 1000
+        repeat: true
+        onTriggered: {
+            displayConfigPage.revertSecondsRemaining--;
+            if (displayConfigPage.revertSecondsRemaining <= 0)
+                displayConfigPage.revertChanges();
+        }
+    }
+
+    function parseMode(modeStr) {
+        let match = modeStr.match(/^(\d+)x(\d+)@([\d.]+)Hz$/);
+        if (!match) return null;
+        return {
+            width: parseInt(match[1]),
+            height: parseInt(match[2]),
+            refreshRate: parseFloat(match[3]),
+            label: `${match[1]}x${match[2]} @ ${parseFloat(match[3]).toFixed(2)} Hz`
+        };
+    }
+
+    function initPending(monitor) {
+        let name = monitor.name;
+        if (!pendingChanges[name]) {
+            let isDefault = name === displayConfigPage.defaultMonitor;
+            pendingChanges[name] = {
+                width: monitor.width,
+                height: monitor.height,
+                refreshRate: monitor.refreshRate,
+                x: monitor.x,
+                y: monitor.y,
+                // monitors.lua holds the exact value; hyprctl's JSON rounds
+                // scale to 2 decimals, which corrupts 1.875 and friends.
+                scale: confScale[name] ?? monitor.scale,
+                transform: monitor.transform,
+                enabled: !monitor.disabled,
+                bitdepth: confBitdepth[name] ?? 8,
+                vrr: confVrr[name] ?? 0,
+                mirror: confMirror[name] ?? "",
+                positionMode: isDefault ? undefined : (confPositionMode[name] ?? "auto-center-right"),
+                // If hdrMode is "Fullscreen Only" (1), cm=hdr isn't in the config file,
+                // but the UI still needs to show HDR as the active color mode.
+                colorMode: (confHdrMode[name] === 1 && !confColorMode[name])
+                    ? "hdr" : (confColorMode[name] ?? "auto"),
+                hdrMode: confHdrMode[name] ?? 0,
+                iccProfile: confIccProfile[name] ?? "",
+                // HDR luminance fallback chain: existing user value
+                // from monitors.lua → manufacturer-suggested defaults
+                // from EDID (CTA-861 HDR Static Metadata block, parsed
+                // by capabilitiesProc) → hardcoded fallback. Means most
+                // HDR users won't need to run the calibration wizard
+                // at all to get sensible starting values; the wizard
+                // becomes "fine-tune" rather than "set up from scratch".
+                maxLuminance:    confMaxLuminance[name]    ?? monitorCapabilities[name]?.hdrMaxLuminance    ?? hdrDefaults.maxLuminance,
+                maxAvgLuminance: confMaxAvgLuminance[name] ?? monitorCapabilities[name]?.hdrMaxAvgLuminance ?? hdrDefaults.maxAvgLuminance,
+                minLuminance:    confMinLuminance[name]    ?? monitorCapabilities[name]?.hdrMinLuminance    ?? hdrDefaults.minLuminance,
+                sdrMaxLuminance: confSdrMaxLuminance[name] ?? hdrDefaults.sdrMaxLuminance,
+                sdrMinLuminance: confSdrMinLuminance[name] ?? hdrDefaults.sdrMinLuminance,
+                sdrBrightness:   confSdrBrightness[name]   ?? hdrDefaults.sdrBrightness,
+                sdrSaturation:   confSdrSaturation[name]   ?? hdrDefaults.sdrSaturation,
+            };
+        }
+    }
+
+    function currentModeIndex(monitor) {
+        let seen = new Set();
+        let sorted = [];
+        let modes = monitor.availableModes || [];
+        modes.forEach(modeStr => {
+            let m = parseMode(modeStr);
+            if (!m) return;
+            let key = `${m.width}x${m.height}@${Math.round(m.refreshRate)}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            sorted.push(m);
+        });
+        sorted.sort((a, b) => {
+            let pixelDiff = (b.width * b.height) - (a.width * a.height);
+            if (pixelDiff !== 0) return pixelDiff;
+            return b.refreshRate - a.refreshRate;
+        });
+        for (let i = 0; i < sorted.length; i++) {
+            let m = sorted[i];
+            if (m.width === monitor.width &&
+                m.height === monitor.height &&
+                Math.abs(m.refreshRate - monitor.refreshRate) < 0.1) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    // The logical footprint a monitor occupies in Hyprland's coordinate space,
+    // which is what x/y are expressed in.  Mode width/height are pixels, so
+    // rotate (transforms 1/3/5/7 are 90°/270°) and divide by the scale.
+    // Uses the pending/monitors.lua scale, never hyprctl's 2-decimal rounding.
+    function logicalSize(monName, p, mon) {
+        let scale = p.scale ?? confScale[monName] ?? mon.scale;
+        if (!(scale > 0)) scale = 1;
+        let rot   = ((p.transform ?? mon.transform ?? 0) % 2) === 1;
+        let pxW   = p.width  ?? mon.width;
+        let pxH   = p.height ?? mon.height;
+        return {
+            width:  Math.round((rot ? pxH : pxW) / scale),
+            height: Math.round((rot ? pxW : pxH) / scale)
+        };
+    }
+
+    // Resolve the visual canvas position of a monitor, honouring positionMode
+    // when it is set to an auto-center-* value.  The default monitor is always
+    // at 0×0; every other monitor is placed relative to it.
+    function resolveEffectivePos(monName, p, mon) {
+        let mode = p.positionMode;
+        if (!mode || monName === displayConfigPage.defaultMonitor) {
+            return { x: p.x ?? mon.x, y: p.y ?? mon.y };
+        }
+        // Find the default monitor's pending dimensions
+        let defName = displayConfigPage.defaultMonitor;
+        let defMon  = displayConfigPage.monitors.find(m => m.name === defName);
+        if (!defMon) return { x: p.x ?? mon.x, y: p.y ?? mon.y };
+        let dp   = displayConfigPage.pendingChanges[defName] ?? {};
+        let defSize  = logicalSize(defName, dp, defMon);
+        let thisSize = logicalSize(monName, p, mon);
+        let defW = defSize.width;
+        let defH = defSize.height;
+        let thisW = thisSize.width;
+        let thisH = thisSize.height;
+        switch (mode) {
+            case "auto-center-right": return { x: defW,           y: Math.round((defH - thisH) / 2) };
+            case "auto-center-left":  return { x: -thisW,         y: Math.round((defH - thisH) / 2) };
+            case "auto-center-up":    return { x: Math.round((defW - thisW) / 2), y: -thisH  };
+            case "auto-center-down":  return { x: Math.round((defW - thisW) / 2), y: defH    };
+            default:                  return { x: p.x ?? mon.x,   y: p.y ?? mon.y };
+        }
+    }
+
+    // Compute canvas scale factor and offset so all monitors fit
+    function canvasLayout(canvasWidth, canvasHeight, padding) {
+        if (monitors.length === 0) return { scale: 1, offsetX: 0, offsetY: 0 };
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        monitors.forEach(mon => {
+            let p   = pendingChanges[mon.name] ?? {};
+            let pos = resolveEffectivePos(mon.name, p, mon);
+            let sz  = logicalSize(mon.name, p, mon);
+            let w   = sz.width;
+            let h   = sz.height;
+            minX = Math.min(minX, pos.x);
+            minY = Math.min(minY, pos.y);
+            maxX = Math.max(maxX, pos.x + w);
+            maxY = Math.max(maxY, pos.y + h);
+        });
+
+        let totalW = maxX - minX;
+        let totalH = maxY - minY;
+        if (totalW <= 0 || totalH <= 0) return { scale: 1, offsetX: 0, offsetY: 0 };
+
+        let scaleX = (canvasWidth  - padding * 2) / totalW;
+        let scaleY = (canvasHeight - padding * 2) / totalH;
+        let s = Math.min(scaleX, scaleY);
+
+        let scaledW = totalW * s;
+        let scaledH = totalH * s;
+
+        return {
+            scale: s,
+            offsetX: padding + (canvasWidth  - padding * 2 - scaledW) / 2 - minX * s,
+            offsetY: padding + (canvasHeight - padding * 2 - scaledH) / 2 - minY * s
+        };
+    }
+
+    Process {
+        id: monitorProc
+        command: ["hyprctl", "monitors", "all", "-j"]
+        property string output: ""
+        stdout: SplitParser {
+            onRead: data => monitorProc.output += data
+        }
+        onExited: {
+            try {
+                let parsed = JSON.parse(monitorProc.output.trim());
+                // Ensure a default monitor is always set.
+                // If general.lua hasn't been read yet (race), or no cursor block exists,
+                // fall back to whichever monitor is at 0x0, or the first monitor.
+                if (!displayConfigPage.defaultMonitor ||
+                    !parsed.find(m => m.name === displayConfigPage.defaultMonitor)) {
+                    let atOrigin = parsed.find(m => m.x === 0 && m.y === 0);
+                    displayConfigPage.defaultMonitor = atOrigin
+                        ? atOrigin.name
+                        : (parsed.length > 0 ? parsed[0].name : "");
+                }
+                // Sort so default monitor appears first
+                parsed.sort((a, b) => {
+                    if (a.name === displayConfigPage.defaultMonitor) return -1;
+                    if (b.name === displayConfigPage.defaultMonitor) return 1;
+                    return 0;
+                });
+                displayConfigPage.monitors = parsed;
+                displayConfigPage.pendingChanges = ({});
+                parsed.forEach(m => displayConfigPage.initPending(m));
+                // Force reassignment so onPendingChangesChanged fires with fully populated data
+                displayConfigPage.pendingChanges = Object.assign({}, displayConfigPage.pendingChanges);
+            } catch (e) {
+                console.warn("Failed to parse monitor data:", e);
+            }
+            monitorProc.output = "";
+        }
+    }
+
+    // Write monitors.lua then reload Hyprland
+    Process {
+        id: writeProc
+        command: []
+        onExited: {
+            reloadProc.running = false;
+            reloadProc.running = true;
+        }
+    }
+
+    // Write general.lua cursor table (default_monitor)
+    Process {
+        id: writeHyprlandProc
+        command: []
+        onExited: {
+            reloadProc.running = false;
+            reloadProc.running = true;
+        }
+    }
+
+    // Read hyprland/general.lua to get the current cursor.default_monitor.
+    // In Lua the field is `default_monitor = "DP-1"` inside a `cursor = { ... }`
+    // table — so we capture between quotes and strip them.
+    Process {
+        id: readHyprlandConfProc
+        command: ["cat", displayConfigPage.hyprlandGeneralPath]
+        property string output: ""
+        stdout: SplitParser {
+            onRead: data => readHyprlandConfProc.output += data + "\n"
+        }
+        onExited: {
+            let defaultMon = "";
+            let inCursorBlock = false;
+            readHyprlandConfProc.output.split("\n").forEach(line => {
+                if (/^\s*cursor\s*=\s*\{/.test(line)) inCursorBlock = true;
+                if (inCursorBlock) {
+                    let m = line.match(/^\s*default_monitor\s*=\s*"([^"]+)"/);
+                    if (m) defaultMon = m[1];
+                }
+                if (/^\s*\}/.test(line)) inCursorBlock = false;
+            });
+            if (defaultMon) {
+                displayConfigPage.defaultMonitor = defaultMon;
+                // Re-sort monitor list if it was already populated before this proc finished
+                if (displayConfigPage.monitors.length > 0) {
+                    let sorted = displayConfigPage.monitors.slice().sort((a, b) => {
+                        if (a.name === defaultMon) return -1;
+                        if (b.name === defaultMon) return 1;
+                        return 0;
+                    });
+                    displayConfigPage.monitors = sorted;
+                }
+            }
+            readHyprlandConfProc.output = "";
+        }
+    }
+
+    // ── ICC profile management ─────────────────────────────────────────────
+
+    // Ensure ~/.icc-profiles/ exists and scan it for profiles.
+    Process {
+        id: iccScanProc
+        property string output: ""
+        command: ["bash", "-c",
+            `mkdir -p '${displayConfigPage.iccProfileDir}' && ` +
+            `find '${displayConfigPage.iccProfileDir}' -maxdepth 1 -type f \\( -iname '*.icc' -o -iname '*.icm' \\) -print0 | ` +
+            `xargs -0 -r ls`]
+        stdout: SplitParser {
+            onRead: data => iccScanProc.output += data + "\n"
+        }
+        onExited: {
+            let profiles = [];
+            iccScanProc.output.split("\n").forEach(line => {
+                let p = line.trim();
+                if (!p) return;
+                let filename = p.split("/").pop();
+                let stem = filename.replace(/\.[^.]+$/, "");
+                // Files imported via Settings are named `<monitor>__<original>.icc`
+                // so two monitors can each have their own profile.icc without
+                // collision. Split that prefix back off for display, but
+                // keep it on disk so the source-monitor info survives.
+                let importedFor = "";
+                let displayName = stem;
+                let sep = stem.indexOf("__");
+                if (sep > 0) {
+                    importedFor = stem.substring(0, sep);
+                    displayName = stem.substring(sep + 2);
+                }
+                profiles.push({ name: displayName, path: p, importedFor: importedFor });
+            });
+            displayConfigPage.iccProfiles = profiles;
+            iccScanProc.output = "";
+        }
+    }
+
+    // Pick a new ICC file using a multi-method fallback chain:
+    //   zenity → kdialog → yad → python3 tkinter
+    // Avoids the python3-gi / xdg-desktop-portal dependency that caused
+    // the original D-Bus implementation to silently fail on many setups.
+    Process {
+        id: iccPickerProc
+        property string targetMonitor: ""
+        property string output: ""
+        command: ["python3", "-c", `
+import subprocess, sys, os
+
+# Each runner only falls through on FileNotFoundError (the picker binary
+# isn't installed). Any other outcome — successful selection, user
+# cancel, internal error — is treated as "this picker handled the
+# request" and stops the chain. Without this, cancelling zenity would
+# spawn kdialog next, which is the wrong behaviour: a cancel is the
+# user's explicit "no", not a signal to try another tool.
+
+def run_zenity():
+    return subprocess.run(
+        ['zenity', '--file-selection',
+         '--title=Import ICC Profile',
+         '--file-filter=ICC Profiles (*.icc *.icm) | *.icc *.icm'],
+        capture_output=True, text=True, timeout=300)
+
+def run_kdialog():
+    return subprocess.run(
+        ['kdialog', '--getopenfilename',
+         os.path.expanduser('~'), '*.icc *.icm|ICC Profiles'],
+        capture_output=True, text=True, timeout=300)
+
+def run_yad():
+    return subprocess.run(
+        ['yad', '--file-selection', '--title=Import ICC Profile',
+         '--file-filter=*.icc|ICC Profile', '--file-filter=*.icm|ICM Profile'],
+        capture_output=True, text=True, timeout=300)
+
+for runner in [run_zenity, run_kdialog, run_yad]:
+    try:
+        r = runner()
+    except FileNotFoundError:
+        continue   # picker not installed — try the next one
+    except Exception:
+        sys.exit(0)  # any other error: don't keep prompting
+    # Picker ran. Emit selected path (if any) and stop the chain —
+    # an empty stdout means the user cancelled, which is fine.
+    out = r.stdout.strip().rstrip('|')   # yad sometimes appends '|'
+    if out:
+        print(out)
+    sys.exit(0)
+
+# Final fallback: tkinter (ships with stdlib, no external picker needed).
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes('-topmost', True)
+    p = filedialog.askopenfilename(
+        title='Import ICC Profile',
+        filetypes=[('ICC Profiles', '*.icc *.icm'), ('All Files', '*')])
+    root.destroy()
+    if p:
+        print(p)
+except Exception:
+    pass
+`]
+        stdout: SplitParser {
+            onRead: data => iccPickerProc.output += data
+        }
+        stderr: SplitParser {
+            onRead: data => console.warn("iccPickerProc stderr:", data)
+        }
+        onExited: (code) => {
+            let src = iccPickerProc.output.trim();
+            let mon = iccPickerProc.targetMonitor;
+            // Clear state immediately so a quick re-click starts fresh
+            iccPickerProc.output = "";
+            iccPickerProc.targetMonitor = "";
+            if (src !== "" && mon !== "") {
+                let filename = src.split("/").pop();
+                // Namespace by target monitor so two displays can each
+                // import a profile with the same source filename
+                // (e.g. both vendors ship `calibration.icc`) without one
+                // silently overwriting the other. Sanitise mon for the
+                // filesystem — Hyprland output names are already safe
+                // (DP-1, HDMI-A-1) but be defensive.
+                let safeMon = mon.replace(/[^A-Za-z0-9_-]/g, "_");
+                iccCopyProc.targetMonitor = mon;
+                iccCopyProc.destPath = `${displayConfigPage.iccProfileDir}/${safeMon}__${filename}`;
+                iccCopyProc.command = ["cp", "--", src, iccCopyProc.destPath];
+                iccCopyProc.running = false;
+                iccCopyProc.running = true;
+            }
+        }
+    }
+
+    // Copy the chosen file then rescan and auto-select it.
+    Process {
+        id: iccCopyProc
+        property string targetMonitor: ""
+        property string destPath: ""
+        command: []
+        onExited: (code) => {
+            if (code === 0 && iccCopyProc.targetMonitor !== "") {
+                displayConfigPage.updatePending(iccCopyProc.targetMonitor, "iccProfile", iccCopyProc.destPath);
+            }
+            iccCopyProc.targetMonitor = "";
+            iccCopyProc.destPath = "";
+            iccScanProc.running = false;
+            iccScanProc.running = true;
+        }
+    }
+
+    // Delete a profile file (called after user confirms).
+    Process {
+        id: iccDeleteProc
+        property string deletedPath: ""
+        property string targetMonitor: ""
+        command: []
+        onExited: {
+            // If the deleted profile was active for any monitor, clear it
+            let mon = iccDeleteProc.targetMonitor;
+            if (mon) {
+                let cur = displayConfigPage.pendingChanges[mon]?.iccProfile ?? "";
+                if (cur === iccDeleteProc.deletedPath)
+                    displayConfigPage.updatePending(mon, "iccProfile", "");
+            }
+            iccDeleteProc.deletedPath = "";
+            iccDeleteProc.targetMonitor = "";
+            iccScanProc.running = false;
+            iccScanProc.running = true;
+        }
+    }
+
+    Process {
+        id: reloadProc
+        command: ["hyprctl", "reload"]
+        onExited: {
+            displayConfigPage.parseMonitorsConf();
+            displayConfigPage.scaleApplied();
+            // If this reload was the tail of an Apply chain, raise the
+            // revert banner now that the new mode is on screen. The
+            // flag is consumed (cleared) here so unrelated reloads
+            // (revertChanges, setDefaultMonitor) don't trigger a
+            // banner.
+            if (displayConfigPage._showBannerAfterNextReload) {
+                displayConfigPage._showBannerAfterNextReload = false;
+                displayConfigPage.revertSecondsRemaining = 15;
+                displayConfigPage.revertPending = true;
+                revertCountdownTimer.start();
+                // Snap the Flickable back to the top so the banner is
+                // unmissable. ContentPage extends StyledFlickable, so
+                // contentY=0 puts row 0 of contentColumn at the visible
+                // top regardless of where the user had scrolled to (the
+                // bottom of the page when clicking a per-monitor Apply
+                // is the typical case).
+                displayConfigPage.contentY = 0;
+            }
+        }
+    }
+
+    Component.onCompleted: {
+        capabilitiesProc.running = true;
+        readHyprlandConfProc.running = true;
+        iccScanProc.running = true;
+        parseMonitorsConf();
+    }
+
+    // If the page is destroyed (settings tab change, settings window
+    // close, full quickshell reload) while a revert is still pending,
+    // assume the user can't see / respond to the banner and revert.
+    // execDetached so the python+hyprctl chain finishes after our QML
+    // state is gone — a normal Process tied to this component would
+    // be killed mid-write.
+    Component.onDestruction: {
+        if (displayConfigPage.revertPending)
+            displayConfigPage.revertChangesDetached();
+    }
+
+    // ── Revert-after-apply banner ──────────────────────────────────────────
+    // Visible for 15s after each Apply. "Keep" clicks accept the new
+    // configuration; "Revert" or timeout (or page navigation, via
+    // Component.onDestruction above) restores monitors.lua from the
+    // pre-apply snapshot and reloads. Sits at the top of the page so a
+    // user who can't see clearly still sees the banner where it always
+    // appears in similar settings tools.
+    Rectangle {
+        Layout.fillWidth: true
+        Layout.preferredHeight: visible ? 60 : 0
+        visible: displayConfigPage.revertPending
+        color: Appearance.colors.colSecondaryContainer
+        radius: Appearance.rounding.normal
+
+        RowLayout {
+            anchors {
+                fill: parent
+                leftMargin: 16
+                rightMargin: 12
+                topMargin: 8
+                bottomMargin: 8
+            }
+            spacing: 12
+
+            MaterialSymbol {
+                text: "schedule"
+                iconSize: Appearance.font.pixelSize.larger
+                color: Appearance.colors.colOnSecondaryContainer
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 0
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Translation.tr("Keep these display settings?")
+                    font.pixelSize: Appearance.font.pixelSize.normal
+                    font.weight: Font.Medium
+                    color: Appearance.colors.colOnSecondaryContainer
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Translation.tr("Reverting in %1 s — leaving the page also reverts.").arg(displayConfigPage.revertSecondsRemaining)
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnSecondaryContainer
+                    opacity: 0.85
+                }
+            }
+
+            RippleButton {
+                Layout.alignment: Qt.AlignVCenter
+                implicitHeight: 32
+                implicitWidth: 88
+                buttonRadius: Appearance.rounding.full
+                colBackground: Appearance.m3colors.m3surfaceContainerHigh
+                colBackgroundHover: Appearance.colors.colLayer2Hover
+                colRipple: Appearance.colors.colLayer2Active
+                contentItem: StyledText {
+                    anchors.centerIn: parent
+                    horizontalAlignment: Text.AlignHCenter
+                    text: Translation.tr("Revert")
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnSecondaryContainer
+                }
+                onClicked: displayConfigPage.revertChanges()
+            }
+
+            RippleButton {
+                Layout.alignment: Qt.AlignVCenter
+                implicitHeight: 32
+                implicitWidth: 88
+                buttonRadius: Appearance.rounding.full
+                colBackground: Appearance.colors.colPrimary
+                colBackgroundHover: Qt.lighter(Appearance.colors.colPrimary, 1.1)
+                colRipple: Qt.lighter(Appearance.colors.colPrimary, 1.2)
+                contentItem: StyledText {
+                    anchors.centerIn: parent
+                    horizontalAlignment: Text.AlignHCenter
+                    text: Translation.tr("Keep")
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnPrimary
+                }
+                onClicked: displayConfigPage.keepChanges()
+            }
+        }
+    }
+
+    // ── Arrangement canvas ─────────────────────────────────────────────────
+    ContentSection {
+        icon: "monitor"
+        title: Translation.tr("Display Arrangement")
+
+        // Canvas area
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: 220
+            color: Appearance.m3colors.m3surfaceContainer
+            radius: Appearance.rounding.normal
+
+            // Re-compute layout whenever pendingChanges or size changes
+            property var layout: displayConfigPage.canvasLayout(width, height, 16)
+            onWidthChanged:  layout = displayConfigPage.canvasLayout(width, height, 16)
+            onHeightChanged: layout = displayConfigPage.canvasLayout(width, height, 16)
+
+            Connections {
+                target: displayConfigPage
+                function onPendingChangesChanged() {
+                    canvasContainer.layout = displayConfigPage.canvasLayout(
+                        canvasContainer.width, canvasContainer.height, 16);
+                }
+                function onMonitorsChanged() {
+                    canvasContainer.layout = displayConfigPage.canvasLayout(
+                        canvasContainer.width, canvasContainer.height, 16);
+                }
+            }
+
+            id: canvasContainer
+
+            StyledText {
+                visible: displayConfigPage.monitors.length === 0
+                anchors.centerIn: parent
+                text: Translation.tr("No monitors detected")
+                color: Appearance.colors.colSubtext
+            }
+
+            Repeater {
+                model: displayConfigPage.monitors
+
+                delegate: Item {
+                    id: monRect
+                    required property var modelData
+                    required property int index
+
+                    property var mon: modelData
+                    property string monName: mon.name
+                    property var pending: displayConfigPage.pendingChanges[monName] ?? {}
+                    property var layout: canvasContainer.layout
+                    property color monColor: displayConfigPage.monitorColors[index % displayConfigPage.monitorColors.length]
+
+                    // Position and size on canvas
+                    property var effectivePos: displayConfigPage.resolveEffectivePos(monName, pending, mon)
+                    property var effectiveSize: displayConfigPage.logicalSize(monName, pending, mon)
+                    x: effectivePos.x * layout.scale + layout.offsetX
+                    y: effectivePos.y * layout.scale + layout.offsetY
+                    width:  effectiveSize.width  * layout.scale
+                    height: effectiveSize.height * layout.scale
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Qt.alpha(monRect.monColor, (pending.enabled ?? true) ? 0.35 : 0.15)
+                        border.color: Qt.alpha(monRect.monColor, 0.8)
+                        border.width: 1
+                        radius: Appearance.rounding.small
+
+                        Behavior on color { ColorAnimation { duration: 100 } }
+                        Behavior on border.color { ColorAnimation { duration: 100 } }
+
+                        // Monitor name
+                        StyledText {
+                            anchors {
+                                top: parent.top
+                                left: parent.left
+                                right: parent.right
+                                margins: 6
+                            }
+                            text: monRect.monName
+                            font.pixelSize: Math.max(9, Math.min(14, parent.height * 0.16))
+                            color: monRect.monColor
+                            elide: Text.ElideRight
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        // Resolution
+                        StyledText {
+                            anchors.centerIn: parent
+                            text: `${pending.width ?? mon.width}×${pending.height ?? mon.height}`
+                            font.pixelSize: Math.max(8, Math.min(12, parent.height * 0.13))
+                            color: Appearance.m3colors.m3onSurface
+                            opacity: 0.7
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+
+                        // Disabled badge
+                        Rectangle {
+                            visible: !(pending.enabled ?? true)
+                            anchors.centerIn: parent
+                            anchors.verticalCenterOffset: parent.height * 0.18
+                            color: Qt.alpha(Appearance.m3colors.m3error, 0.8)
+                            radius: Appearance.rounding.small
+                            implicitWidth: disabledLabel.implicitWidth + 8
+                            implicitHeight: disabledLabel.implicitHeight + 4
+                            StyledText {
+                                id: disabledLabel
+                                anchors.centerIn: parent
+                                text: Translation.tr("OFF")
+                                font.pixelSize: 9
+                                color: Appearance.m3colors.m3onError
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        StyledText {
+            Layout.alignment: Qt.AlignHCenter
+            text: Translation.tr("Use the Position setting under each monitor below to arrange displays")
+            font.pixelSize: Appearance.font.pixelSize.small
+            color: Appearance.colors.colSubtext
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            Layout.fillWidth: true
+        }
+
+        RippleButtonWithIcon {
+            Layout.alignment: Qt.AlignRight
+            buttonRadius: Appearance.rounding.full
+            nerdIcon: ""
+            mainText: Translation.tr("Refresh")
+            onClicked: displayConfigPage.refreshMonitors()
+        }
+    }
+
+    // ── Per-monitor settings ───────────────────────────────────────────────
+    Repeater {
+        model: displayConfigPage.monitors
+
+        delegate: Loader {
+            id: monitorLoader
+            required property var modelData
+            required property int index
+            Layout.fillWidth: true
+            // Build the per-monitor section asynchronously on a worker
+            // thread so the page swap doesn't freeze while QML
+            // instantiates ~400 widgets per monitor (sub-Repeaters for
+            // modes / scales / rotations / VRR / 10-bit / position /
+            // colour modes / EDID / HDR / fine-tune sliders / workspace
+            // pills). The page itself stays sync so Flow-style layouts
+            // on sibling settings pages see their final width before
+            // first binding evaluation — that was the regression we
+            // hit when we tried Loader.asynchronous on the page-level
+            // pageLoader.
+            asynchronous: true
+
+            sourceComponent: ContentSection {
+            id: monitorSection
+            // Forward Repeater delegate properties from the wrapping
+            // Loader so the delegate body's many monitorSection.modelData
+            // / monitorSection.index reads keep resolving the same value.
+            // Plain `property` (not `required`) because Loader sets these
+            // via these bindings, which evaluate after construction;
+            // `required` would error before the binding resolves.
+            property var modelData: monitorLoader.modelData
+            property int index: monitorLoader.index
+
+            property var mon: modelData
+            property string monName: mon.name
+            property var pending: displayConfigPage.pendingChanges[monName] ?? {}
+            property var availableModes: mon.availableModes || []
+            property color monColor: displayConfigPage.monitorColors[index % displayConfigPage.monitorColors.length]
+
+            // Support detection via capabilitiesProc, which:
+            //   - Reads HYPR_VRR_ALLOWED / HYPR_10BIT_ALLOWED from env.lua
+            //     directly (post-install writes these for known-dangerous hardware)
+            //   - Detects the DRM driver and per-connector sysfs capabilities
+            //   - Applies env.lua overrides on top of sysfs results
+            // Defaults to true when no caps entry exists (hardware not known to
+            // be dangerous) so working features are never incorrectly blocked.
+            readonly property bool vrrSupported: {
+                let caps = displayConfigPage.monitorCapabilities[monitorSection.monName];
+                if (caps) return caps.vrr ?? false;
+                return true;
+            }
+            readonly property bool tenBitSupported: {
+                let caps = displayConfigPage.monitorCapabilities[monitorSection.monName];
+                if (caps) return caps.tenBit ?? false;
+                if (mon.supports10bit !== undefined) return mon.supports10bit;
+                return true;
+            }
+            readonly property bool hdrSupported: {
+                let caps = displayConfigPage.monitorCapabilities[monitorSection.monName];
+                if (caps) return caps.hdr ?? false;
+                return false;
+            }
+            // Always-on pill set: Auto, DCI P3, Adobe RGB, Apple RGB,
+            // and HDR (HDR only if the panel is HDR-capable). Anything
+            // else that capabilitiesProc flags as supported by the panel
+            // gets inserted just before HDR — currently that's BT2020,
+            // gated on the CTA-861 Colorimetry Data Block. A previously-
+            // saved mode that's not in the always-on set (e.g. cm = srgb
+            // from an older config) is also restored so the picker doesn't
+            // silently drop the user's current selection.
+            readonly property var supportedColorModes: {
+                let caps = displayConfigPage.monitorCapabilities[monitorSection.monName];
+                let cur = monitorSection.pending.colorMode ?? "srgb";
+                let modes = [
+                    { key: "auto",  label: Translation.tr("Auto") },
+                    { key: "dcip3", label: "DCI P3" },
+                    { key: "adobe", label: "Adobe RGB" },
+                    { key: "dp3",   label: "Apple RGB" },
+                ];
+                // Caps-driven extras, inserted in the order they're listed
+                // here (immediately before any HDR pill we append below).
+                if (caps?.colorBT2020) modes.push({ key: "wide", label: "BT2020" });
+                // Restore a saved mode that's not in any of the lists above
+                // so the user's current pill stays selectable. Label is
+                // upper-cased so unknown / legacy mode names visually stand
+                // out from the curated pill set above.
+                let alreadyHave = modes.some(m => m.key === cur);
+                if (!alreadyHave && cur !== "hdr" && cur !== "hdredid")
+                    modes.push({ key: cur, label: cur.toUpperCase() });
+                if (monitorSection.hdrSupported)
+                    modes.push({ key: "hdr", label: "HDR" });
+                return modes;
+            }
+
+            icon: "tv"
+            title: `${mon.name}  —  ${mon.make} ${mon.model}${displayConfigPage.defaultMonitor === mon.name ? ` (${Translation.tr("Default")})` : ""}`
+
+            // Enable / disable + Set Default
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                ConfigSwitch {
+                    buttonIcon: "power_settings_new"
+                    text: Translation.tr("Enabled")
+                    checked: monitorSection.pending.enabled ?? true
+                    onCheckedChanged: displayConfigPage.updatePending(monitorSection.monName, "enabled", checked)
+                }
+
+                // Set Default button — lights up with monColor when this is the default
+                MouseArea {
+                    id: setDefaultArea
+                    implicitWidth: 30
+                    implicitHeight: 30
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    property bool isDefault: displayConfigPage.defaultMonitor === monitorSection.monName
+
+                    onClicked: displayConfigPage.setDefaultMonitor(monitorSection.monName)
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Appearance.rounding.small
+                        color: setDefaultArea.isDefault
+                            ? monitorSection.monColor
+                            : (setDefaultArea.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2)
+                        border.width: setDefaultArea.isDefault ? 0 : 1
+                        border.color: Appearance.colors.colOutlineVariant
+                        Behavior on color { ColorAnimation { duration: 150 } }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "home"
+                            iconSize: Appearance.font.pixelSize.normal
+                            color: setDefaultArea.isDefault
+                                ? Appearance.colors.colOnPrimary
+                                : Appearance.colors.colSubtext
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                        }
+
+                        StyledToolTip {
+                            visible: setDefaultArea.containsMouse
+                            text: setDefaultArea.isDefault
+                                ? Translation.tr("This is the default monitor (position 0×0)")
+                                : Translation.tr("Set as default monitor")
+                        }
+                    }
+                }
+            }
+
+            // ── Unified settings card ─────────────────────────────────────
+            Rectangle {
+                id: settingsCard
+                Layout.fillWidth: true
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                implicitHeight: settingsCardCol.implicitHeight
+
+                ColumnLayout {
+                    id: settingsCardCol
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    spacing: 0
+
+                    // ── Row: Mode ──────────────────────────────────────────
+                    Item {
+                        id: modeRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+
+                        property bool popupOpen: modePopup.visible
+
+                        property var modeModel: {
+                            let seen = new Set();
+                            let out = [];
+                            monitorSection.availableModes.forEach(modeStr => {
+                                let m = displayConfigPage.parseMode(modeStr);
+                                if (!m) return;
+                                let key = `${m.width}x${m.height}@${Math.round(m.refreshRate)}`;
+                                if (seen.has(key)) return;
+                                seen.add(key);
+                                out.push(m);
+                            });
+                            out.sort((a, b) => {
+                                let pd = (b.width * b.height) - (a.width * a.height);
+                                return pd !== 0 ? pd : b.refreshRate - a.refreshRate;
+                            });
+                            return out;
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            topLeftRadius: Appearance.rounding.normal
+                            topRightRadius: Appearance.rounding.normal
+                            color: modeArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("Mode")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: {
+                                    let p = monitorSection.pending;
+                                    let m = monitorSection.mon;
+                                    return `${p.width ?? m.width}×${p.height ?? m.height} @ ${(p.refreshRate ?? m.refreshRate).toFixed(2)} Hz`;
+                                }
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: modeRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: modeArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: modePopup.visible ? modePopup.close() : modePopup.open()
+                        }
+
+                        SelectPopup {
+                            id: modePopup
+                            maxVisibleRows: 8
+                            options: modeRow.modeModel
+                            currentIndex: {
+                                let p = monitorSection.pending;
+                                let m = monitorSection.mon;
+                                return modeRow.modeModel.findIndex(o =>
+                                    o.width === (p.width ?? m.width) &&
+                                    o.height === (p.height ?? m.height) &&
+                                    Math.abs(o.refreshRate - (p.refreshRate ?? m.refreshRate)) < 0.1);
+                            }
+                            onSelected: (modelData, index) => displayConfigPage.updatePendingBatch(monitorSection.monName, {
+                                width: modelData.width,
+                                height: modelData.height,
+                                refreshRate: modelData.refreshRate,
+                            })
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Row: Scale ─────────────────────────────────────────
+                    Item {
+                        id: scaleRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+
+                        property bool popupOpen: scalePopup.visible
+
+                        // Only scales that render pixel-perfectly on this
+                        // monitor make the list: a scale must be a multiple of
+                        // 1/120 (Wayland apps receive scales in 120ths) AND
+                        // divide the mode into whole logical pixels. Each
+                        // panel shows only its clean steps from this ladder.
+                        readonly property var scaleOptions: {
+                            const w = monitorSection.pending.width  ?? monitorSection.mon.width;
+                            const h = monitorSection.pending.height ?? monitorSection.mon.height;
+                            const ladder = [
+                                { label: "100%", k: 120 },
+                                { label: "107%", k: 128 },
+                                { label: "120%", k: 144 },
+                                { label: "125%", k: 150 },
+                                { label: "133%", k: 160 },
+                                { label: "150%", k: 180 },
+                                { label: "160%", k: 192 },
+                                { label: "167%", k: 200 },
+                                { label: "188%", k: 225 },
+                                { label: "200%", k: 240 },
+                            ];
+                            const opts = ladder
+                                .filter(o => (w * 120) % o.k === 0 && (h * 120) % o.k === 0)
+                                .map(o => ({ label: o.label, value: o.k / 120 }));
+                            // Keep a saved legacy scale (e.g. 188% from the old
+                            // fixed list) selectable on its monitor.
+                            const cur = monitorSection.pending.scale ?? monitorSection.mon.scale;
+                            if (cur && !opts.some(o => Math.abs(o.value - cur) < 0.006)) {
+                                opts.push({ label: `${Math.round(cur * 100)}%`, value: cur });
+                                opts.sort((a, b) => a.value - b.value);
+                            }
+                            return opts;
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: scaleArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("Scale")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: `${Math.round((monitorSection.pending.scale ?? monitorSection.mon.scale) * 100)}%`
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: scaleRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: scaleArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: scalePopup.visible ? scalePopup.close() : scalePopup.open()
+                        }
+
+                        SelectPopup {
+                            id: scalePopup
+                            maxVisibleRows: 4
+                            options: scaleRow.scaleOptions
+                            currentIndex: scaleRow.scaleOptions.findIndex(o => Math.abs(o.value - (monitorSection.pending.scale ?? monitorSection.mon.scale)) < 0.006)
+                            onSelected: (modelData, index) => displayConfigPage.updatePending(monitorSection.monName, "scale", modelData.value)
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Row: Rotation ──────────────────────────────────────
+                    Item {
+                        id: rotationRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+
+                        property bool popupOpen: rotationPopup.visible
+
+                        readonly property var rotationOptions: [
+                            { label: Translation.tr("Landscape"),          value: 0 },
+                            { label: Translation.tr("Portrait"),           value: 1 },
+                            { label: Translation.tr("Landscape (Flipped)"), value: 2 },
+                            { label: Translation.tr("Portrait (Flipped)"), value: 3 },
+                        ]
+
+                        property string rotationLabel: {
+                            let t = monitorSection.pending.transform ?? monitorSection.mon.transform;
+                            let opt = rotationOptions.find(o => o.value === t);
+                            return opt ? opt.label : Translation.tr("0°");
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: rotationArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("Orientation")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: rotationRow.rotationLabel
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: rotationRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: rotationArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: rotationPopup.visible ? rotationPopup.close() : rotationPopup.open()
+                        }
+
+                        SelectPopup {
+                            id: rotationPopup
+                            options: rotationRow.rotationOptions
+                            currentIndex: rotationRow.rotationOptions.findIndex(o => o.value === (monitorSection.pending.transform ?? monitorSection.mon.transform))
+                            onSelected: (modelData, index) => displayConfigPage.updatePending(monitorSection.monName, "transform", modelData.value)
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Row: Duplicate screen ─────────────────────────────
+                    Item {
+                        id: mirrorRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        visible: displayConfigPage.monitors.length > 1
+
+                        property bool popupOpen: mirrorPopup.visible
+
+                        readonly property var mirrorOptions: {
+                            let opts = [{ label: Translation.tr("Off (extend)"), value: "" }];
+                            for (const other of displayConfigPage.monitors) {
+                                if (other.name === monitorSection.monName) continue;
+                                const otherMirror = (displayConfigPage.pendingChanges[other.name]?.mirror) ?? "";
+                                if (otherMirror === monitorSection.monName) continue;
+                                opts.push({ label: other.name, value: other.name });
+                            }
+                            return opts;
+                        }
+
+                        property string mirrorLabel: {
+                            let v = monitorSection.pending.mirror ?? "";
+                            return v === "" ? Translation.tr("Off (extend)") : v;
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: mirrorArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("Duplicate screen")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: mirrorRow.mirrorLabel
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: mirrorRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: mirrorArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: mirrorPopup.visible ? mirrorPopup.close() : mirrorPopup.open()
+                        }
+
+                        SelectPopup {
+                            id: mirrorPopup
+                            options: mirrorRow.mirrorOptions
+                            currentIndex: mirrorRow.mirrorOptions.findIndex(o => o.value === (monitorSection.pending.mirror ?? ""))
+                            onSelected: (modelData, index) => displayConfigPage.updatePending(monitorSection.monName, "mirror", modelData.value)
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Row: VRR ───────────────────────────────────────────
+                    Item {
+                        id: vrrRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        opacity: monitorSection.vrrSupported ? 1.0 : 0.4
+
+                        property bool popupOpen: vrrPopup.visible
+
+                        readonly property var vrrOptions: [
+                            { label: Translation.tr("Off"),              value: 0 },
+                            { label: Translation.tr("Always On"),        value: 1 },
+                            { label: Translation.tr("Fullscreen Only"),  value: 2 },
+                        ]
+
+                        property string vrrLabel: {
+                            let v = monitorSection.pending.vrr ?? 0;
+                            let opt = vrrOptions.find(o => o.value === v);
+                            return opt ? opt.label : Translation.tr("Off");
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: (vrrArea.containsMouse && monitorSection.vrrSupported) ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: "VRR"
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: vrrRow.vrrLabel
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: vrrRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: vrrArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: monitorSection.vrrSupported
+                            cursorShape: monitorSection.vrrSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: vrrPopup.visible ? vrrPopup.close() : vrrPopup.open()
+                        }
+
+                        StyledToolTip {
+                            visible: !monitorSection.vrrSupported
+                            y: (parent.height - implicitHeight) / 2
+                            text: Translation.tr("VRR is not supported by this display or driver.")
+                        }
+
+                        SelectPopup {
+                            id: vrrPopup
+                            options: vrrRow.vrrOptions
+                            currentIndex: vrrRow.vrrOptions.findIndex(o => o.value === (monitorSection.pending.vrr ?? 0))
+                            onSelected: (modelData, index) => displayConfigPage.updatePending(monitorSection.monName, "vrr", modelData.value)
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Row: 10-bit ────────────────────────────────────────
+                    //
+                    // KNOWN ISSUE: with 10-bit ON, Hyprland 0.55.0 renegotiates
+                    // the DRM swapchain (XR24 ↔ XR30) on every layer-surface
+                    // composition change, producing a brief flicker on every
+                    // overview / app drawer / wallpaper selector open/close.
+                    // Upstream fix lives in commit dab9649 ("monitor: don't
+                    // modeset on reserved changes", #14397) — released after
+                    // 0.55.0. When updated past that commit, the flicker
+                    // should stop and this toggle becomes free of side effects.
+                    Item {
+                        id: tenBitRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        opacity: monitorSection.tenBitSupported ? 1.0 : 0.4
+
+                        property bool popupOpen: tenBitPopup.visible
+                        property bool is10bit: (displayConfigPage.pendingChanges[monitorSection.monName]?.bitdepth ?? 8) === 10
+
+                        readonly property var tenBitOptions: [
+                            { label: Translation.tr("Off"), value: false },
+                            { label: Translation.tr("On"),  value: true  },
+                        ]
+
+                        Rectangle {
+                            anchors.fill: parent
+                            bottomLeftRadius: Appearance.rounding.normal
+                            bottomRightRadius: Appearance.rounding.normal
+                            color: (tenBitArea.containsMouse && monitorSection.tenBitSupported) ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: "10-bit"
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: tenBitRow.is10bit ? Translation.tr("On") : Translation.tr("Off")
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: tenBitRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: tenBitArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: monitorSection.tenBitSupported
+                            cursorShape: monitorSection.tenBitSupported ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: tenBitPopup.visible ? tenBitPopup.close() : tenBitPopup.open()
+                        }
+
+                        StyledToolTip {
+                            visible: !monitorSection.tenBitSupported
+                            y: (parent.height - implicitHeight) / 2
+                            text: Translation.tr("10-bit color is not supported by this display or driver.")
+                        }
+
+                        SelectPopup {
+                            id: tenBitPopup
+                            options: tenBitRow.tenBitOptions
+                            currentIndex: tenBitRow.tenBitOptions.findIndex(o => o.value === tenBitRow.is10bit)
+                            onSelected: (modelData, index) => {
+                                if (tenBitRow.is10bit === modelData.value) return;
+                                displayConfigPage.updatePending(monitorSection.monName, "bitdepth", modelData.value ? 10 : 8);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Position relative to default monitor (hidden for the default monitor itself)
+            Item { implicitHeight: 8; visible: positionCard.visible }
+
+            Rectangle {
+                id: positionCard
+                visible: displayConfigPage.defaultMonitor !== "" &&
+                         monitorSection.monName !== displayConfigPage.defaultMonitor
+                Layout.fillWidth: true
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                implicitHeight: positionCardCol.implicitHeight
+
+                ColumnLayout {
+                    id: positionCardCol
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    spacing: 0
+
+                    Item {
+                        id: positionRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+
+                        property bool popupOpen: positionPopup.visible
+
+                        readonly property var positionOptions: [
+                            { label: Translation.tr("To Right of Default Display"), value: "auto-center-right" },
+                            { label: Translation.tr("To Left of Default Display"),  value: "auto-center-left"  },
+                            { label: Translation.tr("Above Default Display"),       value: "auto-center-up"    },
+                            { label: Translation.tr("Below Default Display"),       value: "auto-center-down"  },
+                        ]
+
+                        property string positionLabel: {
+                            let v = monitorSection.pending.positionMode ?? "auto-center-right";
+                            let opt = positionOptions.find(o => o.value === v);
+                            return opt ? opt.label : Translation.tr("To Right of Default");
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            topLeftRadius: Appearance.rounding.normal
+                            topRightRadius: Appearance.rounding.normal
+                            bottomLeftRadius: Appearance.rounding.normal
+                            bottomRightRadius: Appearance.rounding.normal
+                            color: positionArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("Position")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: positionRow.positionLabel
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: positionRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: positionArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: positionPopup.visible ? positionPopup.close() : positionPopup.open()
+                        }
+
+                        SelectPopup {
+                            id: positionPopup
+                            options: positionRow.positionOptions
+                            currentIndex: positionRow.positionOptions.findIndex(o => o.value === (monitorSection.pending.positionMode ?? "auto-center-right"))
+                            onSelected: (modelData, index) => displayConfigPage.updatePending(monitorSection.monName, "positionMode", modelData.value)
+                        }
+                    }
+                }
+            }
+
+            // ── Color Management card ─────────────────────────────────────
+            // Dimmed and click-blocked when an ICC profile is active —
+            // Hyprland's ICC pipeline supersedes its colorspace conversion,
+            // so the cm/HDR/calibration controls below would be no-ops.
+            Rectangle {
+                id: colorMgmtCard
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                implicitHeight: colorMgmtCol.implicitHeight
+                opacity: (monitorSection.pending.iccProfile ?? "") !== "" ? 0.38 : 1.0
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: (monitorSection.pending.iccProfile ?? "") !== ""
+                    propagateComposedEvents: false
+                }
+
+                ColumnLayout {
+                    id: colorMgmtCol
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    spacing: 0
+
+                    // ── Header ────────────────────────────────────────────
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+                            spacing: 8
+                            MaterialSymbol {
+                                text: "palette"
+                                iconSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                                // Aggressive gap close: the Material Symbols
+                                // font's em-box leaves several pixels of
+                                // whitespace inside the icon's bounding box,
+                                // and tweaking RowLayout.spacing alone wasn't
+                                // enough to overcome it. Force the painted
+                                // width as the layout slot AND pull the next
+                                // item further left with a negative right
+                                // margin so the visible glyph ends up flush
+                                // against "Color Management".
+                                Layout.preferredWidth: paintedWidth
+                                Layout.rightMargin: -11
+                            }
+                            StyledText {
+                                text: Translation.tr("Color Management")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: Appearance.m3colors.m3outlineVariant; opacity: 0.5 }
+
+                    // ── Color mode pill selector ───────────────────────────
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: 52
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+                            spacing: 6
+
+                            Item { Layout.fillWidth: true }
+
+                            Repeater {
+                                model: monitorSection.supportedColorModes
+
+                                delegate: MouseArea {
+                                    id: cmPillArea
+                                    required property var modelData
+                                    required property int index
+                                    property bool isActive: {
+                                        let cm = monitorSection.pending.colorMode ?? "srgb";
+                                        // hdredid is a sub-mode of hdr, so the HDR pill stays active
+                                        if (modelData.key === "hdr") return cm === "hdr" || cm === "hdredid";
+                                        return cm === modelData.key;
+                                    }
+                                    implicitWidth: cmPill.implicitWidth
+                                    implicitHeight: 30
+                                    cursorShape: Qt.PointingHandCursor
+                                    hoverEnabled: true
+
+                                    onClicked: {
+                                        let updates = { colorMode: modelData.key };
+                                        // HDR forces 10-bit and defaults to "Fullscreen Only" mode —
+                                        // safer than Always On since it leaves the SDR desktop alone
+                                        // and only flips into HDR for fullscreen clients that ask
+                                        // for it (via render:cm_auto_hdr).
+                                        if (modelData.key === "hdr" || modelData.key === "hdredid") {
+                                            updates.bitdepth = 10;
+                                            if (!(monitorSection.pending.hdrMode > 0))
+                                                updates.hdrMode = 1;
+                                        }
+                                        displayConfigPage.updatePendingBatch(monitorSection.monName, updates);
+                                    }
+
+                                    Rectangle {
+                                        id: cmPill
+                                        anchors.fill: parent
+                                        implicitWidth: cmPillTxt.implicitWidth + 20
+                                        radius: Appearance.rounding.full
+                                        color: cmPillArea.isActive
+                                            ? monitorSection.monColor
+                                            : (cmPillArea.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2)
+                                        border.width: cmPillArea.isActive ? 0 : 1
+                                        border.color: Appearance.colors.colOutlineVariant
+                                        Behavior on color { ColorAnimation { duration: 100 } }
+
+                                        StyledText {
+                                            id: cmPillTxt
+                                            anchors.centerIn: parent
+                                            text: modelData.label
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: cmPillArea.isActive
+                                                ? Appearance.colors.colOnPrimary
+                                                : Appearance.colors.colOnLayer1
+                                        }
+                                    }
+                                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                                }
+                            }
+                        }
+                    }
+
+                    // ── HDR activation dropdown (HDR-capable monitors only) ─
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 1
+                        color: Appearance.m3colors.m3outlineVariant
+                        opacity: 0.5
+                        visible: { let cm = monitorSection.pending.colorMode ?? "srgb"; return cm === "hdr" || cm === "hdredid"; }
+                    }
+
+                    Item {
+                        id: hdrModeRow
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+                        visible: { let cm = monitorSection.pending.colorMode ?? "srgb"; return cm === "hdr" || cm === "hdredid"; }
+
+                        property bool popupOpen: hdrModePopup.visible
+                        readonly property var hdrModeOptions: [
+                            { label: Translation.tr("Fullscreen Only"), value: 1 },
+                            { label: Translation.tr("Always On"),       value: 2 },
+                        ]
+                        property string hdrModeLabel: {
+                            let v = monitorSection.pending.hdrMode || 1;
+                            let opt = hdrModeOptions.find(o => o.value === v);
+                            return opt ? opt.label : Translation.tr("Fullscreen Only");
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            bottomLeftRadius:  Appearance.rounding.normal
+                            bottomRightRadius: Appearance.rounding.normal
+                            color: hdrModeArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            StyledText {
+                                text: Translation.tr("HDR Mode")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            StyledText {
+                                text: hdrModeRow.hdrModeLabel
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: hdrModeRow.popupOpen ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: hdrModeArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: hdrModePopup.visible ? hdrModePopup.close() : hdrModePopup.open()
+                        }
+
+                        SelectPopup {
+                            id: hdrModePopup
+                            options: hdrModeRow.hdrModeOptions
+                            currentIndex: hdrModeRow.hdrModeOptions.findIndex(o => o.value === (monitorSection.pending.hdrMode || 1))
+                            onSelected: (modelData, index) => displayConfigPage.updatePendingBatch(monitorSection.monName, {
+                                hdrMode: modelData.value,
+                                bitdepth: 10,
+                            })
+                        }
+                    }
+
+                }
+            }
+
+            // ── Calibrate Monitor for HDR card ───────────────────────────
+            // First in the HDR-tuning sequence: visual test patterns
+            // catch panel behavior the EDID-seeded defaults can't (ABL,
+            // real perceived black floor, sustained-vs-peak luminance).
+            // Run this once, then use Fine Tune below for nudges.
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                implicitHeight: 52
+                visible: {
+                    let cm = monitorSection.pending.colorMode ?? "srgb";
+                    return cm === "hdr" || cm === "hdredid";
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Appearance.rounding.normal
+                    color: calibrateArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                    Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                }
+
+                RowLayout {
+                    anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+                    spacing: 10
+
+                    MaterialSymbol {
+                        text: "tune"
+                        iconSize: Appearance.font.pixelSize.larger
+                        color: monitorSection.monColor
+                    }
+                    StyledText {
+                        text: Translation.tr("Calibrate Monitor for HDR")
+                        font.pixelSize: Appearance.font.pixelSize.normal
+                        color: Appearance.colors.colOnLayer2
+                        Layout.fillWidth: true
+                    }
+                    MaterialSymbol {
+                        text: "chevron_right"
+                        iconSize: Appearance.font.pixelSize.larger
+                        color: Appearance.colors.colSubtext
+                    }
+                }
+
+                MouseArea {
+                    id: calibrateArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        hdrCalLoader.active = false;
+                        hdrCalLoader.active = true;
+                    }
+                }
+            }
+
+            // ── Fine Tune card (separate from Color Management) ──────────
+            // Second: numeric nudges to the values produced by Calibrate
+            // (or the EDID-seeded defaults if Calibrate hasn't been run).
+            Rectangle {
+                id: fineTuneCard
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                visible: {
+                    let cm = monitorSection.pending.colorMode ?? "srgb";
+                    return cm === "hdr" || cm === "hdredid";
+                }
+                implicitHeight: fineTuneCol.implicitHeight
+
+                ColumnLayout {
+                    id: fineTuneCol
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    spacing: 0
+
+                    // ── Fine Tune dropdown header ─────────────────────────
+                    Item {
+                        id: fineTuneHeader
+                        Layout.fillWidth: true
+                        implicitHeight: 44
+
+                        property bool expanded: false
+
+                        Rectangle {
+                            anchors.fill: parent
+                            topLeftRadius:     Appearance.rounding.normal
+                            topRightRadius:    Appearance.rounding.normal
+                            bottomLeftRadius:  fineTuneHeader.expanded ? 0 : Appearance.rounding.normal
+                            bottomRightRadius: fineTuneHeader.expanded ? 0 : Appearance.rounding.normal
+                            color: fineTuneTitleArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                            spacing: 8
+                            MaterialSymbol {
+                                text: "sliders"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: monitorSection.monColor
+                            }
+                            StyledText {
+                                text: Translation.tr("Fine Tune")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+                            Item { Layout.fillWidth: true }
+                            MaterialSymbol {
+                                text: "keyboard_arrow_down"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                                rotation: fineTuneHeader.expanded ? 180 : 0
+                                Behavior on rotation { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                            }
+                        }
+
+                        MouseArea {
+                            id: fineTuneTitleArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: fineTuneHeader.expanded = !fineTuneHeader.expanded
+                        }
+                    }
+
+                    // ── Fine-tune: SDR category header ────────────────────
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: visible ? 32 : 0
+                        visible: fineTuneHeader.expanded && fineTuneHeader.visible
+                        clip: true
+                        opacity: (monitorSection.pending.hdrMode || 1) === 1 ? 0.38 : 1.0
+                        Behavior on opacity { NumberAnimation { duration: 150 } }
+                        Behavior on implicitHeight { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration; easing.type: Easing.BezierSpline; easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve } }
+
+                        Rectangle {
+                            anchors { top: parent.top; left: parent.left; right: parent.right }
+                            implicitHeight: 1
+                            color: Appearance.m3colors.m3outlineVariant
+                            opacity: 0.5
+                        }
+                        StyledText {
+                            anchors { left: parent.left; verticalCenter: parent.verticalCenter; leftMargin: 16 }
+                            text: "SDR"
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colSubtext
+                        }
+                    }
+
+                    // ── SDR sliders ────────────────────────────────────────
+                    Repeater {
+                        model: [
+                            { label: Translation.tr("SDR Brightness"),        prop: "sdrBrightness",   minV: 0.5, maxV: 3.0, step: 0.01,  dec: 3 },
+                            { label: Translation.tr("SDR Saturation"),        prop: "sdrSaturation",   minV: 0.5, maxV: 2.0, step: 0.01,  dec: 3 },
+                            { label: Translation.tr("SDR Minimum Luminance"), prop: "sdrMinLuminance", minV: 0.0, maxV: 0.1, step: 0.001, dec: 4 },
+                            { label: Translation.tr("SDR Max Luminance"),     prop: "sdrMaxLuminance", minV: 80,  maxV: 1000, step: 5,     dec: 0 },
+                        ]
+                        delegate: Item {
+                            id: sdrSliderRow
+                            required property var modelData
+                            required property int index
+                            Layout.fillWidth: true
+                            implicitHeight: visible ? 44 : 0
+                            visible: fineTuneHeader.expanded && fineTuneHeader.visible
+                            clip: true
+                            opacity: (monitorSection.pending.hdrMode || 1) === 1 ? 0.38 : 1.0
+                            enabled: (monitorSection.pending.hdrMode || 1) !== 1
+                            Behavior on opacity { NumberAnimation { duration: 150 } }
+                            Behavior on implicitHeight { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration; easing.type: Easing.BezierSpline; easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve } }
+                            Rectangle {
+                                anchors { top: parent.top; left: parent.left; right: parent.right }
+                                implicitHeight: 1
+                                color: Appearance.m3colors.m3outlineVariant
+                                opacity: 0.25
+                            }
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 24; rightMargin: 16 }
+                                spacing: 10
+                                StyledText {
+                                    text: sdrSliderRow.modelData.label
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    color: Appearance.colors.colOnLayer2
+                                    Layout.minimumWidth: 172
+                                }
+                                Slider {
+                                    id: sdrFineSlider
+                                    Layout.fillWidth: true
+                                    from:     sdrSliderRow.modelData.minV
+                                    to:       sdrSliderRow.modelData.maxV
+                                    stepSize: sdrSliderRow.modelData.step
+                                    value: {
+                                        let p = monitorSection.pending;
+                                        let prop = sdrSliderRow.modelData.prop;
+                                        return p[prop] ?? displayConfigPage.hdrDefaults[prop] ?? 0;
+                                    }
+                                    onMoved: displayConfigPage.updatePending(monitorSection.monName, sdrSliderRow.modelData.prop, value)
+                                    background: Rectangle {
+                                        x: sdrFineSlider.leftPadding
+                                        y: sdrFineSlider.topPadding + sdrFineSlider.availableHeight / 2 - height / 2
+                                        width: sdrFineSlider.availableWidth; height: 3; radius: 2
+                                        color: Appearance.colors.colLayer3
+                                        Rectangle {
+                                            width: sdrFineSlider.visualPosition * parent.width
+                                            height: parent.height; radius: 2
+                                            color: monitorSection.monColor
+                                        }
+                                    }
+                                    handle: Rectangle {
+                                        x: sdrFineSlider.leftPadding + sdrFineSlider.visualPosition * (sdrFineSlider.availableWidth - width)
+                                        y: sdrFineSlider.topPadding + sdrFineSlider.availableHeight / 2 - height / 2
+                                        width: 14; height: 14; radius: 7
+                                        color: sdrFineSlider.pressed ? Qt.lighter(monitorSection.monColor, 1.2) : monitorSection.monColor
+                                        Behavior on color { ColorAnimation { duration: 80 } }
+                                    }
+                                }
+                                StyledText {
+                                    text: {
+                                        let p = monitorSection.pending;
+                                        let prop = sdrSliderRow.modelData.prop;
+                                        return (p[prop] ?? displayConfigPage.hdrDefaults[prop] ?? 0).toFixed(sdrSliderRow.modelData.dec);
+                                    }
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    font.family: "monospace"
+                                    color: Appearance.colors.colSubtext
+                                    horizontalAlignment: Text.AlignRight
+                                    Layout.minimumWidth: 56
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Fine-tune: HDR category header ────────────────────
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: visible ? 32 : 0
+                        visible: fineTuneHeader.expanded && fineTuneHeader.visible
+                        clip: true
+                        Behavior on implicitHeight { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration; easing.type: Easing.BezierSpline; easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve } }
+
+                        Rectangle {
+                            anchors { top: parent.top; left: parent.left; right: parent.right }
+                            implicitHeight: 1
+                            color: Appearance.m3colors.m3outlineVariant
+                            opacity: 0.5
+                        }
+                        StyledText {
+                            anchors { left: parent.left; verticalCenter: parent.verticalCenter; leftMargin: 16 }
+                            text: "HDR"
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colSubtext
+                        }
+                    }
+
+                    // ── HDR sliders ────────────────────────────────────────
+                    Repeater {
+                        model: [
+                            { label: Translation.tr("HDR Minimum Luminance"), prop: "minLuminance",    minV: 0.0, maxV: 0.5,  step: 0.001, dec: 4 },
+                            { label: Translation.tr("HDR Maximum Luminance"), prop: "maxLuminance",    minV: 100, maxV: 2000, step: 10,    dec: 0 },
+                            { label: Translation.tr("HDR Average Luminance"), prop: "maxAvgLuminance", minV: 100, maxV: 1600, step: 10,    dec: 0 },
+                        ]
+                        delegate: Item {
+                            id: hdrSliderRow
+                            required property var modelData
+                            required property int index
+                            property bool isLast: index === 2
+                            Layout.fillWidth: true
+                            implicitHeight: visible ? 44 : 0
+                            visible: fineTuneHeader.expanded && fineTuneHeader.visible
+                            clip: true
+                            Behavior on implicitHeight { NumberAnimation { duration: Appearance.animation.elementMoveFast.duration; easing.type: Easing.BezierSpline; easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve } }
+                            Rectangle {
+                                anchors.fill: parent
+                                bottomLeftRadius:  hdrSliderRow.isLast ? Appearance.rounding.normal : 0
+                                bottomRightRadius: hdrSliderRow.isLast ? Appearance.rounding.normal : 0
+                                color: "transparent"
+                            }
+                            Rectangle {
+                                anchors { top: parent.top; left: parent.left; right: parent.right }
+                                implicitHeight: 1
+                                color: Appearance.m3colors.m3outlineVariant
+                                opacity: 0.25
+                            }
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 24; rightMargin: 16 }
+                                spacing: 10
+                                StyledText {
+                                    text: hdrSliderRow.modelData.label
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    color: Appearance.colors.colOnLayer2
+                                    Layout.minimumWidth: 172
+                                }
+                                Slider {
+                                    id: hdrFineSlider
+                                    Layout.fillWidth: true
+                                    from:     hdrSliderRow.modelData.minV
+                                    to:       hdrSliderRow.modelData.maxV
+                                    stepSize: hdrSliderRow.modelData.step
+                                    value: {
+                                        let p = monitorSection.pending;
+                                        let prop = hdrSliderRow.modelData.prop;
+                                        return p[prop] ?? displayConfigPage.hdrDefaults[prop] ?? 0;
+                                    }
+                                    onMoved: displayConfigPage.updatePending(monitorSection.monName, hdrSliderRow.modelData.prop, value)
+                                    background: Rectangle {
+                                        x: hdrFineSlider.leftPadding
+                                        y: hdrFineSlider.topPadding + hdrFineSlider.availableHeight / 2 - height / 2
+                                        width: hdrFineSlider.availableWidth; height: 3; radius: 2
+                                        color: Appearance.colors.colLayer3
+                                        Rectangle {
+                                            width: hdrFineSlider.visualPosition * parent.width
+                                            height: parent.height; radius: 2
+                                            color: monitorSection.monColor
+                                        }
+                                    }
+                                    handle: Rectangle {
+                                        x: hdrFineSlider.leftPadding + hdrFineSlider.visualPosition * (hdrFineSlider.availableWidth - width)
+                                        y: hdrFineSlider.topPadding + hdrFineSlider.availableHeight / 2 - height / 2
+                                        width: 14; height: 14; radius: 7
+                                        color: hdrFineSlider.pressed ? Qt.lighter(monitorSection.monColor, 1.2) : monitorSection.monColor
+                                        Behavior on color { ColorAnimation { duration: 80 } }
+                                    }
+                                }
+                                StyledText {
+                                    text: {
+                                        let p = monitorSection.pending;
+                                        let prop = hdrSliderRow.modelData.prop;
+                                        return (p[prop] ?? displayConfigPage.hdrDefaults[prop] ?? 0).toFixed(hdrSliderRow.modelData.dec);
+                                    }
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    font.family: "monospace"
+                                    color: Appearance.colors.colSubtext
+                                    horizontalAlignment: Text.AlignRight
+                                    Layout.minimumWidth: 56
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── HDR Calibration window loader ─────────────────────────────
+            Loader {
+                id: hdrCalLoader
+                active: false
+                source: "HdrCalibration.qml"
+                onLoaded: {
+                    let p = displayConfigPage.pendingChanges[monitorSection.monName] ?? {};
+                    item.monitorName        = monitorSection.monName;
+                    item.fullscreenOnly     = (monitorSection.pending.hdrMode || 1) === 1;
+                    let d = displayConfigPage.hdrDefaults;
+                    item.valMaxLuminance    = p.maxLuminance    ?? d.maxLuminance;
+                    item.valMaxAvgLuminance = p.maxAvgLuminance ?? d.maxAvgLuminance;
+                    item.valMinLuminance    = p.minLuminance    ?? d.minLuminance;
+                    item.valSdrMaxLuminance = p.sdrMaxLuminance ?? d.sdrMaxLuminance;
+                    item.valSdrMinLuminance = p.sdrMinLuminance ?? d.sdrMinLuminance;
+                    item.valSdrBrightness   = p.sdrBrightness   ?? d.sdrBrightness;
+                    item.valSdrSaturation   = p.sdrSaturation   ?? d.sdrSaturation;
+                    // Pass previous values for review comparison (null if never calibrated)
+                    let isCal = displayConfigPage.hdrCalibratedMonitors[monitorSection.monName] ?? false;
+                    item.previousValues = isCal ? {
+                        maxLuminance:    p.maxLuminance    ?? d.maxLuminance,
+                        maxAvgLuminance: p.maxAvgLuminance ?? d.maxAvgLuminance,
+                        minLuminance:    p.minLuminance    ?? d.minLuminance,
+                        sdrMaxLuminance: p.sdrMaxLuminance ?? d.sdrMaxLuminance,
+                        sdrMinLuminance: p.sdrMinLuminance ?? d.sdrMinLuminance,
+                        sdrBrightness:   p.sdrBrightness   ?? d.sdrBrightness,
+                        sdrSaturation:   p.sdrSaturation   ?? d.sdrSaturation,
+                    } : null;
+                    item.done.connect(function(values) {
+                        displayConfigPage.updatePendingBatch(monitorSection.monName, values);
+                        // Mark this monitor as calibrated so fine-tune sliders appear
+                        let cal = Object.assign({}, displayConfigPage.hdrCalibratedMonitors);
+                        cal[monitorSection.monName] = true;
+                        displayConfigPage.hdrCalibratedMonitors = cal;
+                        // Auto-apply: write to monitors.lua and reload Hyprland.
+                        // applyAllChanges always serialises every monitor's
+                        // pendingChanges, so the just-calibrated values land
+                        // in the file alongside any other in-progress edits.
+                        displayConfigPage.applyAllChanges();
+                        hdrCalLoader.active = false;
+                    });
+                    item.cancelled.connect(function() { hdrCalLoader.active = false; });
+                    item.showFullScreen();
+                }
+            }
+
+            // ── ICC Profile card ──────────────────────────────────────────
+            // Mutually exclusive with HDR / cm = anything — when a profile
+            // is active the Color Management card above dims and blocks
+            // input, since Hyprland's ICC LUT replaces colorspace work.
+            // Requires Hyprland ≥ 0.55 with USE_ICC=1 (older builds silently
+            // ignore the `icc =` directive).
+            Rectangle {
+                id: iccCard
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                color: Appearance.colors.colLayer2
+                radius: Appearance.rounding.normal
+                clip: true
+                implicitHeight: iccCardCol.implicitHeight
+
+                ColumnLayout {
+                    id: iccCardCol
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    spacing: 0
+
+                    // ── Header row with Import button ─────────────────────
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: 52
+
+                        Rectangle {
+                            anchors.fill: parent
+                            topLeftRadius: Appearance.rounding.normal
+                            topRightRadius: Appearance.rounding.normal
+                            color: iccImportArea.containsMouse ? Appearance.colors.colLayer3 : "transparent"
+                            Behavior on color { ColorAnimation { duration: Appearance.animation.elementMoveFast.duration } }
+                        }
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+                            spacing: 10
+
+                            MaterialSymbol {
+                                text: "upload_file"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: monitorSection.monColor
+                            }
+                            StyledText {
+                                text: Translation.tr("Import ICC Profile")
+                                font.pixelSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnLayer2
+                            }
+
+                            // Inline pill badge replacing the old hover-only
+                            // info tooltip — always visible so users can't
+                            // miss that activating an ICC profile takes
+                            // precedence over the cm/HDR controls above.
+                            Rectangle {
+                                implicitWidth: iccBadgeTxt.implicitWidth + 14
+                                implicitHeight: iccBadgeTxt.implicitHeight + 6
+                                radius: height / 2
+                                color: Appearance.colors.colLayer3
+                                border.width: 1
+                                border.color: Appearance.colors.colOutlineVariant
+                                StyledText {
+                                    id: iccBadgeTxt
+                                    anchors.centerIn: parent
+                                    text: Translation.tr("Overrides color management")
+                                    font.pixelSize: Appearance.font.pixelSize.smaller
+                                    color: Appearance.colors.colSubtext
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            MaterialSymbol {
+                                text: "chevron_right"
+                                iconSize: Appearance.font.pixelSize.larger
+                                color: Appearance.colors.colSubtext
+                            }
+                        }
+
+                        MouseArea {
+                            id: iccImportArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                iccPickerProc.targetMonitor = monitorSection.monName;
+                                iccPickerProc.running = false;
+                                iccPickerProc.running = true;
+                            }
+                        }
+                    }
+
+                    // ── Profile list ──────────────────────────────────────
+                    Repeater {
+                        model: displayConfigPage.iccProfiles
+
+                        delegate: Item {
+                            id: iccProfileRow
+                            required property var modelData
+                            required property int index
+
+                            property bool isActive: monitorSection.pending.iccProfile === modelData.path
+                            property bool isLast: index === displayConfigPage.iccProfiles.length - 1
+
+                            Layout.fillWidth: true
+                            implicitWidth: parent ? parent.width : 0
+                            implicitHeight: 40
+
+                            // Delete confirmation state
+                            property bool confirmingDelete: false
+
+                            Rectangle {
+                                anchors.fill: parent
+                                topLeftRadius: 0
+                                topRightRadius: 0
+                                bottomLeftRadius: iccProfileRow.isLast ? Appearance.rounding.normal : 0
+                                bottomRightRadius: iccProfileRow.isLast ? Appearance.rounding.normal : 0
+                                color: iccRowHover.containsMouse && !iccProfileRow.confirmingDelete
+                                    ? Appearance.colors.colLayer3 : "transparent"
+                                Behavior on color { ColorAnimation { duration: 100 } }
+                            }
+
+                            Rectangle {
+                                anchors { left: parent.left; right: parent.right; top: parent.top }
+                                implicitHeight: 1
+                                color: Appearance.m3colors.m3outlineVariant
+                                opacity: 0.5
+                            }
+
+                            // Normal row content
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                                spacing: 8
+                                visible: !iccProfileRow.confirmingDelete
+
+                                // Radio indicator
+                                MouseArea {
+                                    id: iccRowHover
+                                    implicitWidth: 20
+                                    implicitHeight: 20
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: displayConfigPage.updatePending(monitorSection.monName, "iccProfile", iccProfileRow.isActive ? "" : iccProfileRow.modelData.path)
+                                    Rectangle {
+                                        anchors.centerIn: parent
+                                        width: 16; height: 16
+                                        radius: 8
+                                        color: "transparent"
+                                        border.width: 2
+                                        border.color: iccProfileRow.isActive
+                                            ? monitorSection.monColor
+                                            : Appearance.colors.colOutlineVariant
+                                        Behavior on border.color { ColorAnimation { duration: 100 } }
+                                        Rectangle {
+                                            anchors.centerIn: parent
+                                            width: 8; height: 8
+                                            radius: 4
+                                            color: monitorSection.monColor
+                                            visible: iccProfileRow.isActive
+                                        }
+                                    }
+                                }
+
+                                // Profile name + (optional) source-monitor tag.
+                                // Clicking anywhere in this column toggles
+                                // the radio.
+                                Item {
+                                    Layout.fillWidth: true
+                                    implicitHeight: nameTxt.implicitHeight
+                                    RowLayout {
+                                        anchors.left: parent.left
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 8
+                                        StyledText {
+                                            id: nameTxt
+                                            text: iccProfileRow.modelData.name
+                                            font.pixelSize: Appearance.font.pixelSize.normal
+                                            color: iccProfileRow.isActive
+                                                ? monitorSection.monColor
+                                                : Appearance.colors.colOnLayer2
+                                        }
+                                        // Tag showing which monitor this profile was
+                                        // imported for. Lets the user tell at a glance
+                                        // when the same display library lists profiles
+                                        // earmarked for different physical panels.
+                                        StyledText {
+                                            visible: (iccProfileRow.modelData.importedFor ?? "") !== ""
+                                            text: `· ${iccProfileRow.modelData.importedFor}`
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: Appearance.colors.colSubtext
+                                        }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: displayConfigPage.updatePending(monitorSection.monName, "iccProfile", iccProfileRow.isActive ? "" : iccProfileRow.modelData.path)
+                                    }
+                                }
+
+                                // Delete button
+                                MouseArea {
+                                    implicitWidth: 22
+                                    implicitHeight: 22
+                                    cursorShape: Qt.PointingHandCursor
+                                    hoverEnabled: true
+                                    onClicked: iccProfileRow.confirmingDelete = true
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "remove"
+                                        iconSize: Appearance.font.pixelSize.normal
+                                        color: Appearance.colors.colSubtext
+                                    }
+                                }
+                            }
+
+                            // Confirmation row
+                            RowLayout {
+                                anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                                spacing: 8
+                                visible: iccProfileRow.confirmingDelete
+
+                                MaterialSymbol {
+                                    text: "warning"
+                                    iconSize: Appearance.font.pixelSize.normal
+                                    color: Appearance.m3colors.m3error
+                                }
+                                StyledText {
+                                    text: Translation.tr("Delete \"%1\"?").arg(iccProfileRow.modelData?.name ?? "")
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    color: Appearance.colors.colOnLayer2
+                                    Layout.fillWidth: true
+                                }
+                                // Confirm delete
+                                MouseArea {
+                                    implicitWidth: 52
+                                    implicitHeight: 24
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        let path = iccProfileRow.modelData.path;
+                                        iccDeleteProc.deletedPath = path;
+                                        iccDeleteProc.targetMonitor = monitorSection.monName;
+                                        iccDeleteProc.command = ["rm", "--", path];
+                                        iccDeleteProc.running = false;
+                                        iccDeleteProc.running = true;
+                                        iccProfileRow.confirmingDelete = false;
+                                    }
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: Appearance.rounding.small
+                                        color: Appearance.m3colors.m3error
+                                        StyledText {
+                                            anchors.centerIn: parent
+                                            text: Translation.tr("Delete")
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: Appearance.m3colors.m3onError
+                                        }
+                                    }
+                                }
+                                // Cancel
+                                MouseArea {
+                                    implicitWidth: 52
+                                    implicitHeight: 24
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: iccProfileRow.confirmingDelete = false
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: Appearance.rounding.small
+                                        color: Appearance.colors.colLayer3
+                                        border.width: 1
+                                        border.color: Appearance.colors.colOutlineVariant
+                                        StyledText {
+                                            anchors.centerIn: parent
+                                            text: Translation.tr("Cancel")
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: Appearance.colors.colOnLayer2
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Empty state
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: 40
+                        visible: displayConfigPage.iccProfiles.length === 0
+
+                        Rectangle {
+                            anchors.fill: parent
+                            bottomLeftRadius: Appearance.rounding.normal
+                            bottomRightRadius: Appearance.rounding.normal
+                            color: "transparent"
+                        }
+                        Rectangle {
+                            anchors { left: parent.left; right: parent.right; top: parent.top }
+                            implicitHeight: 1
+                            color: Appearance.m3colors.m3outlineVariant
+                            opacity: 0.5
+                        }
+                        StyledText {
+                            anchors.centerIn: parent
+                            text: Translation.tr("No profiles imported")
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colSubtext
+                        }
+                    }
+                }
+            }
+
+            ContentSubsection {
+                id: wsSubsection
+                visible: displayConfigPage.monitors.length > 1
+                title: Translation.tr("Custom Workspaces")
+                tooltip: Translation.tr("Assign workspaces to this monitor")
+
+                // How many 10-workspace rows this monitor currently shows
+                property int rowCount: displayConfigPage.wsRowCounts[monitorSection.monName] ?? 1
+
+                function setRowCount(n) {
+                    let rc = Object.assign({}, displayConfigPage.wsRowCounts);
+                    rc[monitorSection.monName] = Math.max(1, n);
+                    displayConfigPage.wsRowCounts = rc;
+                }
+
+                // Clear workspace assignments for a range when a row is removed
+                function clearRowAssignments(rowIndex) {
+                    let a = Object.assign({}, displayConfigPage.workspaceAssignments);
+                    let start = rowIndex * 10 + 1;
+                    let end   = rowIndex * 10 + 10;
+                    for (let ws = start; ws <= end; ws++) {
+                        if (a[ws] === monitorSection.monName) delete a[ws];
+                    }
+                    displayConfigPage.workspaceAssignments = a;
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    // Dynamic workspace rows — row 0 shares its line with the Custom pill
+                    Repeater {
+                        model: wsSubsection.rowCount
+
+                        delegate: RowLayout {
+                            id: wsRow
+                            required property int index
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            property int rowIndex: index
+                            property bool isLastRow: rowIndex === wsSubsection.rowCount - 1
+
+                            // Custom mode toggle — only shown on the first row, inline with pills
+                            MouseArea {
+                                visible: wsRow.rowIndex === 0
+                                implicitWidth: customPill.implicitWidth
+                                implicitHeight: 26
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (displayConfigPage.wsBindingMode === "custom") {
+                                        displayConfigPage.wsBindingMode = "default";
+                                        displayConfigPage.clearAllAssignments();
+                                    } else {
+                                        displayConfigPage.wsBindingMode = "custom";
+                                    }
+                                }
+                                readonly property bool active: displayConfigPage.wsBindingMode === "custom"
+
+                                Rectangle {
+                                    id: customPill
+                                    anchors.fill: parent
+                                    implicitWidth: customPillTxt.implicitWidth + 16
+                                    radius: Appearance.rounding.small
+                                    color: parent.active
+                                        ? Appearance.colors.colPrimary
+                                        : (parent.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2)
+                                    border.width: parent.active ? 0 : 1
+                                    border.color: Appearance.colors.colOutlineVariant
+                                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                                    StyledText {
+                                        id: customPillTxt
+                                        anchors.centerIn: parent
+                                        // Reflects the active state: "Enabled" when custom-mode
+                                        // is on (pill is filled), "Enable" when it's off (pill
+                                        // is the click-to-activate affordance).
+                                        text: parent.parent.active
+                                            ? Translation.tr("Enabled")
+                                            : Translation.tr("Enable")
+                                        font.pixelSize: Appearance.font.pixelSize.small
+                                        color: parent.parent.active
+                                            ? Appearance.colors.colOnPrimary
+                                            : Appearance.colors.colOnLayer1
+                                    }
+                                }
+                            }
+
+                            // 10 numbered pills for this row
+                            Repeater {
+                                model: 10
+                                delegate: MouseArea {
+                                    id: wsPillArea
+                                    required property int index
+                                    property int wsNum: wsRow.rowIndex * 10 + index + 1
+                                    property bool assigned: displayConfigPage.workspaceAssignments[wsNum] === monitorSection.monName
+                                    property string assignedTo: displayConfigPage.workspaceAssignments[wsNum] ?? ""
+                                    property bool takenByOther: assignedTo !== "" && assignedTo !== monitorSection.monName
+                                    property bool isCustom: displayConfigPage.wsBindingMode === "custom"
+
+                                    implicitWidth: wsPill.implicitWidth
+                                    implicitHeight: 26
+                                    cursorShape: isCustom ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    enabled: isCustom
+
+                                    onClicked: {
+                                        if (isCustom) displayConfigPage.assignWorkspace(wsNum, monitorSection.monName);
+                                    }
+
+                                    Rectangle {
+                                        id: wsPill
+                                        anchors.fill: parent
+                                        implicitWidth: Math.max(26, wsPillTxt.implicitWidth + 12)
+                                        radius: Appearance.rounding.small
+                                        color: {
+                                            if (!wsPillArea.isCustom) return Appearance.colors.colLayer2;
+                                            if (wsPillArea.assigned) return monitorSection.monColor;
+                                            if (wsPillArea.takenByOther) return Appearance.colors.colLayer2;
+                                            return wsPillArea.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2;
+                                        }
+                                        border.width: wsPillArea.assigned ? 0 : 1
+                                        border.color: Appearance.colors.colOutlineVariant
+                                        opacity: {
+                                            if (!wsPillArea.isCustom) return 0.35;
+                                            if (wsPillArea.takenByOther) return 0.35;
+                                            return 1.0;
+                                        }
+                                        Behavior on color { ColorAnimation { duration: 100 } }
+                                        Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                                        StyledText {
+                                            id: wsPillTxt
+                                            anchors.centerIn: parent
+                                            text: String(wsPillArea.wsNum)
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: wsPillArea.assigned
+                                                ? Appearance.colors.colOnPrimary
+                                                : Appearance.colors.colOnLayer1
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Remove row button — shown on every row after the first
+                            MouseArea {
+                                visible: wsRow.isLastRow && wsRow.rowIndex > 0
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    // Only remove if this is the last row (can only remove from the end)
+                                    if (wsRow.isLastRow) {
+                                        wsSubsection.clearRowAssignments(wsRow.rowIndex);
+                                        wsSubsection.setRowCount(wsSubsection.rowCount - 1);
+                                    }
+                                }
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: Appearance.rounding.small
+                                    color: parent.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2
+                                    border.width: 1
+                                    border.color: Appearance.colors.colOutlineVariant
+                                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "remove"
+                                        iconSize: Appearance.font.pixelSize.normal
+                                        color: Appearance.colors.colOnLayer2
+                                    }
+                                }
+                            }
+
+                            // Add row button — only shown on the last row
+                            MouseArea {
+                                visible: wsRow.isLastRow
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: wsSubsection.setRowCount(wsSubsection.rowCount + 1)
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: Appearance.rounding.small
+                                    color: parent.containsMouse ? Appearance.colors.colLayer3 : Appearance.colors.colLayer2
+                                    border.width: 1
+                                    border.color: Appearance.colors.colOutlineVariant
+                                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "add"
+                                        iconSize: Appearance.font.pixelSize.normal
+                                        color: Appearance.colors.colOnLayer2
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Per-monitor Apply button removed — replaced by the
+            // single page-level "Apply" below the Repeater. The
+            // function always wrote every monitor anyway; the
+            // per-monitor click just caused N reloads for one
+            // logical change.
+        }
+        }   // close Loader wrapping the delegate (sourceComponent above)
+    }
+
+    // ── Apply changes ──────────────────────────────────────────────────────
+    // Single Apply for the whole page. applyAllChanges() loops every
+    // monitor's pendingChanges and writes one full monitors.lua, then
+    // reloads once — versus the old behavior of clicking Apply per
+    // monitor and triggering N reloads in sequence (each flashing the
+    // outputs).
+    RowLayout {
+        Layout.fillWidth: true
+
+        Item { Layout.fillWidth: true }
+
+        RippleButton {
+            implicitHeight: 36
+            implicitWidth: 160
+            buttonRadius: Appearance.rounding.full
+            colBackground: Appearance.colors.colPrimary
+            colBackgroundHover: Qt.lighter(Appearance.colors.colPrimary, 1.1)
+            colRipple: Qt.lighter(Appearance.colors.colPrimary, 1.2)
+
+            contentItem: StyledText {
+                anchors.centerIn: parent
+                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: Appearance.font.pixelSize.normal
+                text: Translation.tr("Apply changes")
+                color: Appearance.colors.colOnPrimary
+            }
+
+            onClicked: displayConfigPage.applyAllChanges()
+        }
+    }
+}
