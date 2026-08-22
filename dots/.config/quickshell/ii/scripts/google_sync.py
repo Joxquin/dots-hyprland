@@ -175,6 +175,19 @@ def sync_tasks():
     if not token:
         return
 
+    # Load existing local tasks to preserve local-only metadata (starred, recurrence, time)
+    local_map = {}
+    if os.path.exists(TODO_FILE):
+        try:
+            with open(TODO_FILE, "r") as f:
+                local_list = json.load(f)
+                for item in local_list:
+                    gid = item.get("gtask_id")
+                    if gid:
+                        local_map[gid] = item
+        except Exception:
+            pass
+
     # Fetch default task list
     res = api_request("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?showCompleted=true&showHidden=true", token)
     if not res or "items" not in res:
@@ -187,11 +200,37 @@ def sync_tasks():
         title = t.get("title", "").strip()
         if not title:
             continue
-        status = t.get("status", "") == "completed"
+        gtask_id = t.get("id", "")
+        status = (t.get("status", "") == "completed")
+        raw_notes = t.get("notes", "") or ""
+        due_raw = t.get("due", "") or ""
+
+        # Check if starred on Google Tasks (encoded in notes or title)
+        starred_from_google = ("[starred]" in raw_notes) or ("⭐" in raw_notes) or ("⭐" in title)
+        clean_notes = raw_notes.replace("[starred]", "").replace("⭐", "").strip()
+
+        # Preserve local-only metadata if existing
+        local_item = local_map.get(gtask_id, {})
+        starred = starred_from_google or local_item.get("starred", False)
+        recurrence = local_item.get("recurrence", None)
+        due_date = local_item.get("due_date", "")
+        due_time = local_item.get("due_time", "")
+        has_time = local_item.get("has_time", False)
+
+        if due_raw and not due_date:
+            due_date = due_raw.split("T")[0]
+
         todo_items.append({
             "content": title,
+            "notes": clean_notes,
             "done": status,
-            "gtask_id": t.get("id", "")
+            "starred": starred,
+            "due": due_raw,
+            "due_date": due_date,
+            "due_time": due_time,
+            "has_time": has_time,
+            "recurrence": recurrence,
+            "gtask_id": gtask_id
         })
 
     os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
@@ -200,35 +239,173 @@ def sync_tasks():
 
     print(f"[GoogleSync] Synced {len(todo_items)} tasks from Google Tasks!")
 
-def add_task(title):
+def add_task(task_input):
+    import time
     auth = load_auth()
     token = get_valid_access_token(auth)
+
+    if isinstance(task_input, str):
+        try:
+            task_data = json.loads(task_input)
+            if not isinstance(task_data, dict):
+                task_data = {"content": str(task_input)}
+        except Exception:
+            task_data = {"content": task_input}
+    else:
+        task_data = task_input or {}
+
+    title = (task_data.get("content") or task_data.get("title") or "").strip()
     if not title:
         print(f"[RESULT]{json.dumps({'success': False, 'message': 'Título vacío'})}")
         return
+
+    notes = (task_data.get("notes") or "").strip()
+    due_date = task_data.get("due_date") or ""
+    due_time = task_data.get("due_time") or ""
+    has_time = bool(task_data.get("has_time", False))
+    starred = bool(task_data.get("starred", False))
+    recurrence = task_data.get("recurrence", None)
+
+    due_rfc = task_data.get("due") or ""
+    if not due_rfc and due_date:
+        if has_time and due_time:
+            due_rfc = f"{due_date}T{due_time}:00.000Z"
+        else:
+            due_rfc = f"{due_date}T00:00:00.000Z"
+
+    # 1. Save locally first into todo.json
+    local_task = {
+        "content": title,
+        "notes": notes,
+        "done": False,
+        "starred": starred,
+        "due": due_rfc,
+        "due_date": due_date,
+        "due_time": due_time,
+        "has_time": has_time,
+        "recurrence": recurrence,
+        "gtask_id": f"local_{int(time.time())}"
+    }
+
+    existing_tasks = []
+    if os.path.exists(TODO_FILE):
+        try:
+            with open(TODO_FILE, "r") as f:
+                existing_tasks = json.load(f)
+        except Exception:
+            existing_tasks = []
+
+    existing_tasks.insert(0, local_task)
+    try:
+        os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
+        with open(TODO_FILE, "w") as f:
+            json.dump(existing_tasks, f, indent=2)
+    except Exception as e:
+        print(f"[GoogleSync] Error saving local task: {e}")
+
     result = {"success": True, "synced": False, "message": "Guardado localmente"}
+
     if token:
-        resp = api_request("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", token, method="POST", body={"title": title})
+        body = {"title": title}
+        notes_for_google = notes
+        if starred and "[starred]" not in notes_for_google:
+            notes_for_google = f"{notes_for_google}\n[starred]".strip()
+        if notes_for_google:
+            body["notes"] = notes_for_google
+        if due_rfc:
+            body["due"] = due_rfc
+
+        resp = api_request("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks", token, method="POST", body=body)
         if resp and "id" in resp:
+            local_task["gtask_id"] = resp["id"]
+            # Save updated task id
+            try:
+                with open(TODO_FILE, "w") as f:
+                    json.dump(existing_tasks, f, indent=2)
+            except Exception:
+                pass
             sync_tasks()
             result = {"success": True, "synced": True, "message": "Sincronizado con Google Tasks"}
+
     print(f"[RESULT]{json.dumps(result)}")
     return result
 
-def update_task_status(task_id, done):
+def update_task_status(task_id, updates_input):
     auth = load_auth()
     token = get_valid_access_token(auth)
     if not task_id:
         print(f"[RESULT]{json.dumps({'success': False, 'message': 'ID no válido'})}")
         return
-    status = "completed" if done else "needsAction"
-    body = {"status": status}
+
+    # Parse updates_input (can be bool/string for 'done' or JSON object for multi-field updates)
+    updates = {}
+    if isinstance(updates_input, bool):
+        updates = {"done": updates_input}
+    elif isinstance(updates_input, str):
+        if updates_input.lower() in ("true", "false"):
+            updates = {"done": updates_input.lower() == "true"}
+        else:
+            try:
+                updates = json.loads(updates_input)
+            except Exception:
+                updates = {}
+
+    # Update local todo.json
+    local_tasks = []
+    found_item = None
+    if os.path.exists(TODO_FILE):
+        try:
+            with open(TODO_FILE, "r") as f:
+                local_tasks = json.load(f)
+                for item in local_tasks:
+                    if item.get("gtask_id") == task_id:
+                        found_item = item
+                        for k, v in updates.items():
+                            item[k] = v
+                        break
+        except Exception:
+            pass
+
+    if found_item:
+        try:
+            with open(TODO_FILE, "w") as f:
+                json.dump(local_tasks, f, indent=2)
+        except Exception:
+            pass
+
     result = {"success": True, "synced": False, "message": "Actualizado localmente"}
+
     if token:
-        resp = api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="PATCH", body=body)
-        if resp is not None:
-            sync_tasks()
-            result = {"success": True, "synced": True, "message": "Sincronizado con Google Tasks"}
+        body = {}
+        if "done" in updates:
+            body["status"] = "completed" if updates["done"] else "needsAction"
+        if "content" in updates:
+            body["title"] = updates["content"]
+        if "notes" in updates:
+            current_starred = found_item.get("starred", False) if found_item else False
+            base_notes = updates["notes"]
+            if current_starred and "[starred]" not in base_notes:
+                body["notes"] = f"{base_notes}\n[starred]".strip()
+            else:
+                body["notes"] = base_notes
+        if "starred" in updates:
+            current_notes = found_item.get("notes", "") if found_item else ""
+            clean_notes = current_notes.replace("[starred]", "").replace("⭐", "").strip()
+            if updates["starred"]:
+                body["notes"] = f"{clean_notes}\n[starred]".strip()
+            else:
+                body["notes"] = clean_notes
+        if "due" in updates:
+            body["due"] = updates["due"]
+
+        if body:
+            resp = api_request(f"https://tasks.googleapis.com/tasks/v1/lists/@default/tasks/{task_id}", token, method="PATCH", body=body)
+            if resp is not None:
+                sync_tasks()
+                result = {"success": True, "synced": True, "message": "Sincronizado con Google Tasks"}
+        else:
+            result = {"success": True, "synced": True, "message": "Actualizado localmente"}
+
     print(f"[RESULT]{json.dumps(result)}")
     return result
 
@@ -372,7 +549,7 @@ if __name__ == "__main__":
             add_task(" ".join(sys.argv[2:]))
     elif cmd == "update-task":
         if len(sys.argv) > 3:
-            update_task_status(sys.argv[2], sys.argv[3].lower() == "true")
+            update_task_status(sys.argv[2], " ".join(sys.argv[3:]))
     elif cmd == "delete-task":
         if len(sys.argv) > 2:
             delete_task(sys.argv[2])

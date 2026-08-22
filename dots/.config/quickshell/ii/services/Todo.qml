@@ -22,13 +22,33 @@ Singleton {
         todoFileView.setText(JSON.stringify(root.list))
     }
 
-    function addTask(desc) {
-        const item = {
-            "content": desc,
-            "done": false,
+    function addTask(descOrObj) {
+        let item = {};
+        if (typeof descOrObj === "string") {
+            item = {
+                "content": descOrObj,
+                "done": false,
+                "starred": false
+            };
+        } else if (typeof descOrObj === "object" && descOrObj !== null) {
+            item = Object.assign({ "done": false, "starred": false }, descOrObj);
         }
-        addItem(item)
-        Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-task", desc]);
+        addItem(item);
+        const payload = (typeof descOrObj === "string") ? descOrObj : JSON.stringify(descOrObj);
+        Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "add-task", payload]);
+    }
+
+    function toggleStarred(index) {
+        if (index >= 0 && index < list.length) {
+            const gtaskId = list[index].gtask_id ?? "";
+            list[index].starred = !Boolean(list[index].starred);
+            root.list = list.slice(0);
+            todoFileView.setText(JSON.stringify(root.list));
+            if (gtaskId) {
+                const payload = JSON.stringify({ "starred": list[index].starred });
+                Quickshell.execDetached(["python3", Quickshell.shellPath("scripts/google_sync.py"), "update-task", gtaskId, payload]);
+            }
+        }
     }
 
     function markDone(index) {
