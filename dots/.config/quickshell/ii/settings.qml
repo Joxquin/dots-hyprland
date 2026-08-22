@@ -50,6 +50,12 @@ ApplicationWindow {
             component: "modules/settings/InterfaceConfig.qml"
         },
         {
+            name: Translation.tr("Display"),
+            icon: "monitor",
+            component: "modules/settings/DisplayConfig.qml",
+            asynchronous: true
+        },
+        {
             name: Translation.tr("Services"),
             icon: "settings",
             component: "modules/settings/ServicesConfig.qml"
@@ -242,6 +248,7 @@ ApplicationWindow {
                     id: pageLoader
                     anchors.fill: parent
                     opacity: 1.0
+                    asynchronous: Boolean(root.pages[root.currentPage]?.asynchronous)
 
                     active: Config.ready
                     Component.onCompleted: {
@@ -253,6 +260,15 @@ ApplicationWindow {
                         function onCurrentPageChanged() {
                             switchAnim.complete();
                             switchAnim.start();
+                        }
+                    }
+
+                    Connections {
+                        target: pageLoader.item
+                        ignoreUnknownSignals: true
+                        function onScaleApplied() {
+                            root.x = Math.round((Screen.width - root.width) / 2);
+                            root.y = Math.round((Screen.height - root.height) / 2);
                         }
                     }
 
