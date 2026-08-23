@@ -22,8 +22,8 @@ esac
 case "${SKIP_QUICKSHELL}" in
   true) true;;
   *)
-     # Should overwriting the whole directory not only ~/.config/quickshell/ii/ cuz https://github.com/end-4/dots-hyprland/issues/2294#issuecomment-3448671064
-    install_dir__sync dots/.config/quickshell "$XDG_CONFIG_HOME"/quickshell
+    showfun install_quickshell
+    v install_quickshell
     ;;
 esac
 

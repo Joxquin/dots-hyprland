@@ -170,6 +170,25 @@ function install_dir__sync_exclude(){
   fi
   v rsync_dir__sync_exclude $s $t "$@"
 }
+function install_quickshell(){
+  local src_name="end4-pC"
+  local src_url="https://github.com/joxquin/end4-pC"
+  local src_dir="$REPO_ROOT/cache/$src_name"
+  local target_dir="${XDG_CONFIG_HOME}/quickshell/$src_name"
+  x mkdir -p "$src_dir"
+  x cd "$src_dir"
+  try git init -b unBlur
+  try git remote add origin "$src_url"
+  try git remote set-url origin "$src_url"
+  x git pull origin unBlur
+  x git submodule update --init --recursive
+  warning_overwrite
+  install_dir__sync "$src_dir" "$target_dir"
+  x cd "$REPO_ROOT"
+  x mkdir -p "$(dirname ${INSTALLED_LISTFILE})"
+  realpath -se "$target_dir" >> "${INSTALLED_LISTFILE}"
+}
+
 function install_google_sans_flex(){
   local font_name="Google Sans Flex"
   local src_name="google-sans-flex"
